@@ -1,27 +1,59 @@
-# eds-tui installer for Windows. See install.sh for Linux/macOS and for
-# why this clone+pack+install approach is used instead of a plain
-# `npm install -g eds-tui` or `npm install -g git+https://...` — both are
-# currently unreliable for this package (stale npm registry publish, and a
-# confirmed-flaky npm git-dependency fetch for this repo, respectively).
+# eds-tui installer for Windows. See install.sh for Linux/macOS.
 #
-# Quick install (run in PowerShell):
 #   irm https://raw.githubusercontent.com/edantonio505/eds-tui-js/main/install.ps1 | iex
+#
+# The normal way to install eds-tui is:
+#
+#   npm install -g eds-tui@latest
+#
+# This script is the FALLBACK for when that can't work: no reachable npm
+# registry (air-gapped, proxy, outage), or a box that needs a version newer
+# than what's published. It is what miniclosedai-node's installer drops to
+# when its `npm install -g eds-tui@latest` fails.
+#
+# It clones the repo with plain git (NOT npm's own git-dependency fetch),
+# runs `npm pack` on that local checkout, and installs the resulting tarball.
+# `npm install -g git+https://github.com/...` for THIS repo was confirmed
+# unreliable, reporting success while leaving an incomplete install.
+#
+# Because this is the fallback path it BOOTSTRAPS Node and git via winget
+# rather than bailing when they're missing — it runs precisely on the boxes
+# where that toolchain is the broken thing.
 
 $ErrorActionPreference = "Stop"
 $RepoUrl = "https://github.com/edantonio505/eds-tui-js.git"
 
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    Write-Error "Node.js >=20 is required. Install it first: https://nodejs.org"
-    exit 1
+$NodeOk = $false
+if (Get-Command node -ErrorAction SilentlyContinue) {
+    $NodeMajor = [int]((node -e "console.log(process.versions.node.split('.')[0])") 2>$null)
+    if ($NodeMajor -ge 20) { $NodeOk = $true }
 }
-$NodeMajor = [int]((node -e "console.log(process.versions.node.split('.')[0])") 2>$null)
-if ($NodeMajor -lt 20) {
-    Write-Error "Node.js >=20 is required (found $(node -v)). Install a newer version: https://nodejs.org"
+if (-not $NodeOk) {
+    Write-Host "Installing Node.js (eds-tui needs >=20)..."
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget install --id OpenJS.NodeJS.LTS --silent --accept-source-agreements --accept-package-agreements
+        # winget updates the machine PATH, not this process's cached copy.
+        $env:Path = "$env:ProgramFiles\nodejs;$env:Path"
+    }
+    if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+        Write-Error "Node.js >=20 is required and couldn't be installed automatically. Install it from https://nodejs.org, then re-run."
+        exit 1
+    }
+}
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    Write-Error "npm isn't available even though node is. Reinstall Node.js: https://nodejs.org"
     exit 1
 }
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Error "git is required to install eds-tui reliably right now. Install it first."
-    exit 1
+    Write-Host "Installing git (this fallback installer clones the repo)..."
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget install --id Git.Git --silent --accept-source-agreements --accept-package-agreements
+        $env:Path = "$env:ProgramFiles\Git\cmd;$env:Path"
+    }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Error "git is required by this fallback installer. Install git, or use the normal path: npm install -g eds-tui@latest"
+        exit 1
+    }
 }
 
 $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("eds-tui-install-" + [System.Guid]::NewGuid())
