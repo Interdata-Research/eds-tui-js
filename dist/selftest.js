@@ -18,7 +18,7 @@ import chalk from "chalk";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { makeClient, DEFAULT_MAIN_MODEL, DEFAULT_SMALL_MODEL } from "./client.js";
+import { makeClient, desiredModels } from "./client.js";
 import { triage } from "./triage.js";
 import { resolveModel } from "./resolve-model.js";
 import { buildSystemPrompt } from "./prompt-builder.js";
@@ -84,7 +84,10 @@ function fmtSeconds(n) {
     return s.length >= 7 ? s : " ".repeat(7 - s.length) + s;
 }
 export async function selfCheck() {
-    const { client, mainModel, smallModel } = await makeClient(DEFAULT_MAIN_MODEL, DEFAULT_SMALL_MODEL, process.env);
+    // Same env resolution as cli.ts -- shared via desiredModels() precisely so
+    // the two entry points can't disagree about which model was asked for.
+    const { main, small } = desiredModels(process.env);
+    const { client, mainModel, smallModel } = await makeClient(main, small, process.env);
     const startedAll = Date.now();
     const results = [];
     console.log();

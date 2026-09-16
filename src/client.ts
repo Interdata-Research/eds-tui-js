@@ -6,9 +6,13 @@
 // falls back silently and without added latency to EDS_TUI_URL/EDS_TUI_TOKEN.
 //
 // Deliberately takes desiredMain/desiredSmall/env as parameters rather than
-// reading EDS_TUI_MODEL/EDS_TUI_SMALL_MODEL itself — cli.ts (the real entry
-// point) owns reading env vars once; this module stays testable without
-// mutating process.env.
+// reading process.env directly — the entry points decide when to apply
+// env-derived names, and this module stays testable without mutating
+// process.env. The env -> model-name *resolution* does live here, in
+// desiredModels(), so that cli.ts and selftest.ts cannot drift apart on the
+// precedence. They did drift: both hardcoded the defaults and neither ever
+// read EDS_TUI_MODEL, despite the README documenting it and
+// miniclosedai-node's installer writing it into two rc files.
 
 import { Ollama } from "ollama";
 import { Agent, fetch as undiciFetch } from "undici";
@@ -18,6 +22,18 @@ export const DEFAULT_MAIN_MODEL = "qwen3.8:latest";
 export const DEFAULT_SMALL_MODEL = "ornith:35b";
 export const DEFAULT_MINICLOSEDAI_URL = "https://127.0.0.1:8095";
 export const DEFAULT_HOST = "http://192.168.0.110:11434";
+
+/** The main/small model names the caller *wants*: env first, package defaults
+ *  otherwise. `.trim() ||` rather than `??` on purpose — an empty or
+ *  whitespace-only value must fall back to the default rather than ask the
+ *  relay for a model literally named "", which is what
+ *  `printf 'export EDS_TUI_MODEL=%q' ""` in an installer would hand us. */
+export function desiredModels(env: NodeJS.ProcessEnv): { main: string; small: string } {
+  return {
+    main: env.EDS_TUI_MODEL?.trim() || DEFAULT_MAIN_MODEL,
+    small: env.EDS_TUI_SMALL_MODEL?.trim() || DEFAULT_SMALL_MODEL,
+  };
+}
 
 export interface ResolvedClient {
   client: Ollama;

@@ -10,24 +10,27 @@ HTTPS — no Python/pipx toolchain needed on the target machine.
 ## Install
 
 ```bash
+npm install -g eds-tui@latest
+```
+
+Needs Node.js >=20. This gives you the `ask` command on PATH. `ask --upgrade`
+pulls from the same place, so install and upgrade always agree on what
+"latest" means.
+
+If the npm registry isn't reachable (air-gapped, proxy, outage) or you need
+something newer than what's published, there's a fallback installer that
+clones this repo and installs a locally packed tarball:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/edantonio505/eds-tui-js/main/install.sh | bash
 ```
 
 Windows (PowerShell): `irm https://raw.githubusercontent.com/edantonio505/eds-tui-js/main/install.ps1 | iex`
 
-Needs Node.js >=20 and git. This gives you the `ask` command on PATH.
-
-**Why not `npm install -g eds-tui`** (the eventual, simpler intended form):
-the npm registry publish is currently stuck on an old version (a
-publishing-account access issue, unrelated to this repo's code), and
-separately, `npm install -g git+https://github.com/...` for this repo has
-been confirmed unreliable — it can report success while silently producing
-an incomplete install, with no visible error. `install.sh`/`install.ps1`
-clone with a plain `git clone`, then `npm pack` the local checkout (no
-network dependency resolution involved) and install that tarball — this
-sidesteps both problems and has been reliable in repeated testing where the
-direct methods were not. `ask --upgrade` uses the same mechanism. Safe to
-re-run either to upgrade.
+That path additionally needs `git`, and it bootstraps Node itself if the box
+doesn't have a new enough one. It deliberately avoids `npm install -g
+git+https://github.com/...`, which for this repo was confirmed unreliable —
+it can report success while silently leaving an incomplete install.
 
 ## Configuration
 
@@ -103,7 +106,8 @@ ask --login          # save a validated hub URL + relay API key to ~/.eds_tui/cr
 ask --whoami         # show the saved login and re-check it still works
 ask --logout         # remove the saved login
 ask --test           # self-check: prove routing, skills, delegation, escalation, specialist routing and consult work
-ask --upgrade        # update to the latest version (clone + pack + install, see Install above)
+ask --upgrade        # update to the latest published version (npm install -g eds-tui@latest)
+ask --version        # print the installed version and exit
 ```
 
 ## Model routing

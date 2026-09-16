@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pickModels, fallbackClient, DEFAULT_HOST } from "./client.js";
+import { pickModels, fallbackClient, desiredModels, DEFAULT_HOST, DEFAULT_MAIN_MODEL, DEFAULT_SMALL_MODEL } from "./client.js";
 import { saveCredentials } from "./credentials.js";
 
 function withTempCredentialsPath(fn: (path: string) => void): void {
@@ -90,4 +90,32 @@ test("fallbackClient: EDS_TUI_URL set alone (no token env var) still wins over a
     assert.equal((client as any).config.host, "http://env.example:11434");
     assert.deepEqual((client as any).config.headers, {}, "must not pair the saved token with an explicitly different env URL");
   });
+});
+
+test("desiredModels: unset env falls back to the package defaults", () => {
+  const { main, small } = desiredModels({});
+  assert.equal(main, DEFAULT_MAIN_MODEL);
+  assert.equal(small, DEFAULT_SMALL_MODEL);
+});
+
+test("desiredModels: EDS_TUI_MODEL / EDS_TUI_SMALL_MODEL are honored when set", () => {
+  const { main, small } = desiredModels({
+    EDS_TUI_MODEL: "qwen3-coder:30b",
+    EDS_TUI_SMALL_MODEL: "llama3.2:3b",
+  });
+  assert.equal(main, "qwen3-coder:30b");
+  assert.equal(small, "llama3.2:3b");
+});
+
+test("desiredModels: empty or whitespace-only values fall back rather than requesting a model named \"\"", () => {
+  // `printf 'export EDS_TUI_MODEL=%q' ""` in an installer produces exactly
+  // this, and asking the relay for "" would 404 every run.
+  const { main, small } = desiredModels({ EDS_TUI_MODEL: "", EDS_TUI_SMALL_MODEL: "   " });
+  assert.equal(main, DEFAULT_MAIN_MODEL);
+  assert.equal(small, DEFAULT_SMALL_MODEL);
+});
+
+test("desiredModels: surrounding whitespace is trimmed off a real value", () => {
+  const { main } = desiredModels({ EDS_TUI_MODEL: "  qwen3.8:latest\n" });
+  assert.equal(main, "qwen3.8:latest");
 });

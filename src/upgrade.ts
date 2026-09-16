@@ -1,65 +1,40 @@
-// Ported from eds_tui/main.py's self_upgrade() — originally just
-// `npm install -g eds-tui@latest`. Reworked to clone+pack+install instead,
-// for two confirmed, independent reasons (not assumptions):
-//   1. The npm registry publish for this package is currently stuck on an
-//      old version (account access issue on the publishing side), so
-//      `@latest` from the registry would silently downgrade a real install
-//      back to that ancient version.
-//   2. `npm install -g git+https://github.com/...` for this repo was
-//      directly tested and confirmed unreliable — it can report success
-//      while producing an incomplete install (missing dist/, or even a
-//      completely empty package directory), with no visible error. This
-//      is npm's own internal git-dependency fetch/cache machinery, not
-//      this project's packaging.
-// A plain `git clone` (not npm's own git-fetch) + `npm pack` on the local
-// checkout (tars local files only, no network/git resolution involved) +
-// `npm install -g` that tarball sidesteps both problems — confirmed
-// reliable across repeated real installs where the direct methods above
-// were not. See install.sh for the same logic as a standalone script.
+// Ported from eds_tui/main.py's self_upgrade(), and back to that original
+// simple form: `npm install -g eds-tui@latest`.
+//
+// This used to clone+pack+install instead, for two reasons that are both now
+// gone. The first was that the npm registry publish for this package was
+// stuck on an old version (an account-access issue on the publishing side),
+// so `@latest` would have silently downgraded a real install — resolved,
+// 0.6.2 onward is published. The second was that `npm install -g
+// git+https://github.com/...` for this repo was confirmed unreliable, able
+// to report success while leaving an incomplete install; that was npm's own
+// git-dependency fetch machinery and simply does not apply to a registry
+// tarball. install.sh/install.ps1 keep the clone+pack path as a fallback for
+// boxes that can't reach the registry at all.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import * as ui from "./ui.js";
 
-const REPO_URL = "https://github.com/edantonio505/eds-tui-js.git";
-
 export function selfUpgrade(): never {
-  ui.say("\n  Upgrading eds-tui...\n");
+  ui.say("\n  Upgrading eds-tui from npm...\n");
 
-  const tmp = mkdtempSync(join(tmpdir(), "eds-tui-upgrade-"));
-  let exitCode: number;
-  try {
-    ui.say("  Cloning eds-tui-js...");
-    const clone = spawnSync("git", ["clone", "--depth", "1", "-q", REPO_URL, tmp], { stdio: "inherit" });
-    if (clone.status !== 0) {
-      ui.warn("git clone failed — check your network and that git is installed.");
-      exitCode = clone.status ?? 1;
-    } else {
-      ui.say("  Packing...");
-      const pack = spawnSync("npm", ["pack", "--silent"], { cwd: tmp, encoding: "utf8" });
-      const tarball = pack.stdout.trim().split("\n").pop() ?? "";
-      if (pack.status !== 0 || !tarball || !readdirSync(tmp).includes(tarball)) {
-        ui.warn("npm pack did not produce a tarball — aborting.");
-        exitCode = pack.status || 1;
-      } else {
-        ui.say("  Installing the ask CLI...");
-        const install = spawnSync("npm", ["install", "-g", join(tmp, tarball)], { stdio: "inherit" });
-        if (install.status === 0) {
-          ui.say("\n  Done. Restart ask to use the new version.\n");
-        } else {
-          ui.warn("npm install failed — check your npm permissions.");
-        }
-        exitCode = install.status ?? 1;
-      }
-    }
-  } finally {
-    // NOT inside a process.exit() branch above — process.exit() does not
-    // unwind through `finally` the way a normal return/throw does, so
-    // cleanup has to happen via ordinary control flow completing first,
-    // with process.exit() called only once, after this function returns.
-    rmSync(tmp, { recursive: true, force: true });
+  const r = spawnSync("npm", ["install", "-g", "eds-tui@latest", "--no-fund", "--no-audit"], {
+    stdio: "inherit",
+  });
+
+  if (r.status === 0) {
+    ui.say("\n  Done. Restart ask to use the new version.\n");
+  } else {
+    // Deliberately no automatic sudo retry, unlike the installers: `ask` can
+    // be run with no controlling terminal to type a password into, and an
+    // interactive tool escalating privileges on its own is worse than
+    // printing the command for the user to run deliberately.
+    ui.warn("npm install -g eds-tui@latest failed.");
+    ui.warn("If that was a permissions error (EACCES), your global npm prefix needs root:");
+    ui.warn("  sudo npm install -g eds-tui@latest");
+    ui.warn("Or use the standalone installer, which does not need the registry:");
+    ui.warn("  curl -fsSL https://raw.githubusercontent.com/edantonio505/eds-tui-js/main/install.sh | bash");
   }
-  process.exit(exitCode);
+
+  process.exit(r.status ?? 1);
 }

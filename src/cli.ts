@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import chalk from "chalk";
 import type { Message } from "ollama";
 
-import { makeClient, DEFAULT_MAIN_MODEL, DEFAULT_SMALL_MODEL } from "./client.js";
+import { makeClient, desiredModels } from "./client.js";
 import { triage } from "./triage.js";
 import { resolveModel, pinFor } from "./resolve-model.js";
 import { buildSystemPrompt } from "./prompt-builder.js";
@@ -144,6 +144,17 @@ function shellFlagHint(text: string): never {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
 
+  // Before anything else: no skill seeding, no network, no TTY needed. This
+  // is what an installer probes, so it has to be the cheapest path in here.
+  if (argv.includes("--version") || argv.includes("-v")) {
+    // APP_DIR is <pkg>/dist, resolved through realpathSync above, so this
+    // works through the `npm install -g` bin symlink too. package.json ships
+    // in the tarball regardless of the `files` whitelist.
+    const pkg = JSON.parse(readFileSync(join(APP_DIR, "..", "package.json"), "utf8"));
+    console.log(pkg.version);
+    process.exit(0);
+  }
+
   // One-time-only: seeds eds-tui's bundled default skills the first time
   // ~/.eds_tui/skills doesn't exist at all yet. A no-op on every later run,
   // including after a user edits or deletes what was seeded.
@@ -190,7 +201,9 @@ async function main(): Promise<void> {
   const forceFast = argv.includes("--fast");
   const forceSmart = argv.includes("--smart");
 
-  const { client, mainModel, smallModel } = await makeClient(DEFAULT_MAIN_MODEL, DEFAULT_SMALL_MODEL, process.env);
+  // EDS_TUI_MODEL / EDS_TUI_SMALL_MODEL if set, package defaults otherwise.
+  const { main, small } = desiredModels(process.env);
+  const { client, mainModel, smallModel } = await makeClient(main, small, process.env);
 
   ui.printHeader(process.cwd());
 
