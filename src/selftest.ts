@@ -140,6 +140,7 @@ export async function selfCheck(): Promise<void> {
       smallModel,
       cwd: process.cwd(),
       delegateTask: makeDelegateTask(smallModel, process.cwd(), process.cwd()),
+      delegateTaskMain: makeDelegateTask(mainModel, process.cwd(), process.cwd()),
       consultSpecialist: makeConsultSpecialist([], smallModel, process.cwd(), process.cwd()),
       saveHistory: () => {},
       ...overrides,

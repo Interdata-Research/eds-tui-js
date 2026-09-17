@@ -18,6 +18,7 @@ function baseDeps(client: Ollama, overrides: Partial<AgenticLoopDeps> = {}): Age
     smallModel: SMALL,
     cwd: CWD,
     delegateTask: async () => "delegated result",
+    delegateTaskMain: async () => "delegated result (main)",
     consultSpecialist: async () => "consult result",
     saveHistory: () => {},
     ...overrides,
@@ -250,6 +251,89 @@ test("delegate_task/load_skill/create_skill dispatch to the right handler and in
   } finally {
     skills.setSkillsDir(realDir);
     rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("delegate_task: model:\"main\" dispatches to deps.delegateTaskMain, not deps.delegateTask", async () => {
+  let callIndex = 0;
+  const client = {
+    chat: async () => {
+      callIndex += 1;
+      if (callIndex === 1) {
+        return {
+          message: {
+            role: "assistant",
+            content: "",
+            tool_calls: [{ function: { name: "delegate_task", arguments: { task: "do a thing", model: "main" } } }],
+          } as Message,
+        };
+      }
+      return finalResponse("done");
+    },
+  } as unknown as Ollama;
+
+  let smallCalled = false;
+  let mainTask = "";
+  const messages: Message[] = [{ role: "user", content: "go" }];
+  await agenticLoop(
+    baseDeps(client, {
+      delegateTask: async () => {
+        smallCalled = true;
+        return "wrong assistant";
+      },
+      delegateTaskMain: async (_c, task) => {
+        mainTask = task;
+        return "delegated to main";
+      },
+    }),
+    messages,
+    MAIN
+  );
+
+  assert.equal(mainTask, "do a thing");
+  assert.equal(smallCalled, false, "model:\"main\" must not also call the small-model delegate function");
+  const toolResults = messages.filter((m) => m.role === "tool").map((m) => m.content);
+  assert.ok(toolResults.includes("delegated to main"));
+});
+
+test("delegate_task: no model argument (and model:\"small\") still dispatches to deps.delegateTask — default is unchanged", async () => {
+  for (const modelArg of [undefined, "small"]) {
+    let callIndex = 0;
+    const client = {
+      chat: async () => {
+        callIndex += 1;
+        if (callIndex === 1) {
+          const args: Record<string, unknown> = { task: "do a thing" };
+          if (modelArg !== undefined) args.model = modelArg;
+          return {
+            message: {
+              role: "assistant",
+              content: "",
+              tool_calls: [{ function: { name: "delegate_task", arguments: args } }],
+            } as Message,
+          };
+        }
+        return finalResponse("done");
+      },
+    } as unknown as Ollama;
+
+    let mainCalled = false;
+    const messages: Message[] = [{ role: "user", content: "go" }];
+    await agenticLoop(
+      baseDeps(client, {
+        delegateTask: async () => "delegated to small",
+        delegateTaskMain: async () => {
+          mainCalled = true;
+          return "wrong assistant";
+        },
+      }),
+      messages,
+      MAIN
+    );
+
+    assert.equal(mainCalled, false, `model:${JSON.stringify(modelArg)} must not call delegateTaskMain`);
+    const toolResults = messages.filter((m) => m.role === "tool").map((m) => m.content);
+    assert.ok(toolResults.includes("delegated to small"));
   }
 });
 
@@ -542,6 +626,65 @@ test("delegate_tasks: runs all tasks genuinely CONCURRENTLY, not sequentially �
     `elapsed (${elapsedMs}ms) should be well under N sequential delays (${DELAY_MS * N}ms) if genuinely parallel`
   );
   assert.equal(stats.delegations, N, "each task counts as its own delegation");
+});
+
+test("delegate_tasks: model:\"main\" fans every task out through deps.delegateTaskMain, concurrently — not deps.delegateTask", async () => {
+  const DELAY_MS = 100;
+  const N = 3;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let smallCalled = false;
+
+  const delegateTaskMain = async (_c: Ollama, task: string): Promise<string> => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((r) => setTimeout(r, DELAY_MS));
+    inFlight -= 1;
+    return `main report for: ${task}`;
+  };
+
+  let callIndex = 0;
+  const client = {
+    chat: async () => {
+      callIndex += 1;
+      if (callIndex === 1) {
+        return {
+          message: {
+            role: "assistant",
+            content: "",
+            tool_calls: [
+              {
+                function: {
+                  name: "delegate_tasks",
+                  arguments: { tasks: Array.from({ length: N }, (_, i) => `task ${i + 1}`), model: "main" },
+                },
+              },
+            ],
+          } as Message,
+        };
+      }
+      return finalResponse("all done");
+    },
+  } as unknown as Ollama;
+
+  const messages: Message[] = [{ role: "user", content: "go" }];
+  const started = Date.now();
+  await agenticLoop(
+    baseDeps(client, {
+      delegateTask: async () => {
+        smallCalled = true;
+        return "wrong assistant";
+      },
+      delegateTaskMain,
+    }),
+    messages,
+    MAIN
+  );
+  const elapsedMs = Date.now() - started;
+
+  assert.equal(smallCalled, false, "model:\"main\" must not touch deps.delegateTask at all");
+  assert.equal(maxInFlight, N, "all N main-model tasks must have been in flight at the same time");
+  assert.ok(elapsedMs < DELAY_MS * N, `elapsed (${elapsedMs}ms) should be well under N sequential delays`);
 });
 
 test("delegate_tasks: combines each task's report, labeled by task number, in order", async () => {

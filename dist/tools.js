@@ -27,7 +27,9 @@ export const DELEGATE_TOOL = {
             "access you do. Use it for mechanical legwork — gathering listings, counting things, " +
             "checking status, reading a value out of a file — so you can stay focused on the " +
             "harder reasoning. It cannot see your conversation, so give it one complete " +
-            "instruction. It returns a short text report of what it found.",
+            "instruction. It returns a short text report of what it found. By default it runs " +
+            "on the small model; pass model:\"main\" to hand it to the full-capability network " +
+            "model instead, for a subtask that needs real reasoning rather than legwork.",
         parameters: {
             type: "object",
             properties: {
@@ -35,6 +37,13 @@ export const DELEGATE_TOOL = {
                     type: "string",
                     description: "A complete, self-contained instruction, e.g. 'Count the lines in every " +
                         "*.py file in the current directory and report the totals'",
+                },
+                model: {
+                    type: "string",
+                    enum: ["small", "main"],
+                    description: "Which assistant runs the subtask. \"small\" (default) for cheap mechanical " +
+                        "legwork. \"main\" for a subtask that genuinely needs the full-capability " +
+                        "network model's reasoning.",
                 },
             },
             required: ["task"],
@@ -53,7 +62,11 @@ export const DELEGATE_TASKS_TOOL = {
             "you have; none of them can see your conversation or each other, so every task " +
             "must be a complete instruction on its own. Returns each task's report, labeled by " +
             "task number. If you only have ONE task, use delegate_task instead — this tool is " +
-            "for genuinely independent work you want done in parallel.",
+            "for genuinely independent work you want done in parallel. By default every task " +
+            "runs on the small model; pass model:\"main\" when the tasks need real reasoning " +
+            "rather than legwork — firing several at once this way is also how you fan work " +
+            "out across the interdata network's own compute, since each concurrent request for " +
+            "the same model lands on a different node.",
         parameters: {
             type: "object",
             properties: {
@@ -62,6 +75,13 @@ export const DELEGATE_TASKS_TOOL = {
                     items: { type: "string" },
                     description: "Two or more complete, self-contained instructions, each independent of the " +
                         "others, e.g. ['Count the *.py files in src/', 'Count the *.py files in tests/']",
+                },
+                model: {
+                    type: "string",
+                    enum: ["small", "main"],
+                    description: "Which assistant runs every task in this batch. \"small\" (default) for cheap " +
+                        "mechanical legwork. \"main\" for tasks that genuinely need the full-capability " +
+                        "network model's reasoning, run in parallel across the network.",
                 },
             },
             required: ["tasks"],

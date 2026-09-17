@@ -253,6 +253,7 @@ async function main() {
         smallModel,
         cwd: process.cwd(),
         delegateTask: makeDelegateTask(smallModel, process.cwd(), APP_DIR),
+        delegateTaskMain: makeDelegateTask(mainModel, process.cwd(), APP_DIR),
         consultSpecialist: makeConsultSpecialist(pool, smallModel, process.cwd(), APP_DIR),
         saveHistory,
         modelPool: pool,

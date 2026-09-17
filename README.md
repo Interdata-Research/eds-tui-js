@@ -268,22 +268,28 @@ repository into a code-execution path.
 ## Delegation
 
 The main model (or a tier-3 specialist standing in for it) also gets a
-`delegate_task` tool and can spawn the small model as a sub-agent for
-mechanical legwork — gathering listings, counting things, checking status —
-while it stays on the reasoning. A sub-agent gets shell access but no
-delegation tool of its own and no view of the parent conversation, so each
-delegated task has to stand alone. It runs its own agentic loop (up to 5
-steps) and returns a text report as the parent's tool result.
+`delegate_task` tool and can spawn a sub-agent — by default the **small**
+model — for mechanical legwork: gathering listings, counting things,
+checking status — while it stays on the reasoning. A sub-agent gets shell
+access but no delegation tool of its own and no view of the parent
+conversation, so each delegated task has to stand alone. It runs its own
+agentic loop (up to 5 steps) and returns a text report as the parent's tool
+result.
+
+Passing `model:"main"` hands the subtask to the **main** model instead — the
+network's full-capability model (`qwen3.8:latest` by default) — for a
+subtask that genuinely needs real reasoning, not just legwork.
 
 ### Parallel fan-out (`delegate_tasks`)
 
-When it has several genuinely **independent** pieces of legwork — nothing
-that depends on another task's result — the main model can hand them all to
+When it has several genuinely **independent** pieces of work — nothing that
+depends on another task's result — the main model can hand them all to
 `delegate_tasks` at once instead of calling `delegate_task` repeatedly.
 They run **at the same time as each other**, not one after another: real
 concurrency (`Promise.all`, not a queue), each with its own sub-agent, its
 own shell, and no visibility into the others. Their combined reports come
-back as one tool result, labeled by task number.
+back as one tool result, labeled by task number. The same `model:"small"|
+"main"` choice applies to the whole batch.
 
 This isn't just faster because the tasks overlap — it's faster because a
 network with more than one node serving the delegate model spreads
@@ -291,13 +297,17 @@ concurrent requests across them for free. miniaicloud's relay round-robins
 across every backend registered for a given model name on each request; `ask`
 never has to know or care which physical node ends up doing the work.
 Measured live against a real multi-node network: 4 independent delegated
-tasks took **2.07x longer run one at a time than run concurrently**.
+tasks took **2.07x longer run one at a time than run concurrently**. Firing
+several `model:"main"` tasks at once is how you deliberately spread real
+reasoning work across the network's `qwen3.8:latest`-class nodes specifically
+— not just the small model's cheap legwork.
 
 ## Consulting a specialist mid-task
 
-`delegate_task`/`delegate_tasks` hand off mechanical legwork to the *small*
-model. Tier-3 escalation (above) hands off the *entire remaining session* to
-a specialist, but only mechanically, as a last resort, once the main model
+`delegate_task`/`delegate_tasks` hand off work to the *small* model by
+default, or the *main* model with `model:"main"`. Tier-3 escalation (above)
+hands off the *entire remaining session* to a specialist, but only
+mechanically, as a last resort, once the main model
 has already run out of turns or hit an error.
 
 `consult_specialist` is a third, different thing: the main model (or a

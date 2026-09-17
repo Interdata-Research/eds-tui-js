@@ -100,6 +100,15 @@ function createSkill(args) {
         `(model ${skill.model}). It is available from the next ask run onward.`);
 }
 /**
+ * Which bound delegate function a tool call's optional `model` argument
+ * selects — "main" for the network's full-capability model (deps.mainModel,
+ * e.g. qwen3.8:latest), anything else (missing, "small", or garbled) for the
+ * small model, same default as before this parameter existed.
+ */
+function pickDelegateFn(deps, modelArg) {
+    return modelArg === "main" ? deps.delegateTaskMain : deps.delegateTask;
+}
+/**
  * Dispatch N independent tasks to N sub-agents CONCURRENTLY (Promise.all,
  * not one after another) and combine their reports. Each call reuses the
  * exact same delegateTask function the single-task path uses — no new
@@ -108,13 +117,17 @@ function createSkill(args) {
  * same model comes for free from the relay's own round-robin backend
  * selection (verified directly against miniaicloud's source): concurrent
  * requests for the same model name land on different registered backends,
- * ask never needs to address a specific node itself.
+ * ask never needs to address a specific node itself. `modelArg` ("small" |
+ * "main", from the tool call) picks which model every task in this batch
+ * runs on — "main" is how a batch fans out across the network's
+ * qwen3.8:latest-class nodes specifically, not just the small model's.
  */
-async function delegateTasksInParallel(deps, tasks) {
+async function delegateTasksInParallel(deps, tasks, modelArg) {
     if (tasks.length === 0)
         return "No tasks were given to delegate_tasks.";
+    const fn = pickDelegateFn(deps, modelArg);
     ui.printDelegatingTasksHeader(tasks);
-    const reports = await Promise.all(tasks.map((task) => deps.delegateTask(deps.client, task)));
+    const reports = await Promise.all(tasks.map((task) => fn(deps.client, task)));
     return tasks.map((task, i) => `Task ${i + 1}: ${task}\nResult: ${reports[i]}`).join("\n\n");
 }
 /**
@@ -278,12 +291,12 @@ export async function agenticLoop(deps, messages, initialActiveModel, stats = {}
                 let output;
                 if (tc.function.name === "delegate_task") {
                     stats.delegations = (stats.delegations ?? 0) + 1;
-                    output = await deps.delegateTask(deps.client, args.task ?? "");
+                    output = await pickDelegateFn(deps, args.model)(deps.client, args.task ?? "");
                 }
                 else if (tc.function.name === "delegate_tasks") {
                     const tasks = Array.isArray(args.tasks) ? args.tasks.filter((t) => typeof t === "string") : [];
                     stats.delegations = (stats.delegations ?? 0) + tasks.length;
-                    output = await delegateTasksInParallel(deps, tasks);
+                    output = await delegateTasksInParallel(deps, tasks, args.model);
                 }
                 else if (tc.function.name === "consult_specialist") {
                     stats.consultations = (stats.consultations ?? 0) + 1;
