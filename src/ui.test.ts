@@ -11,7 +11,7 @@ test("displayModel: strips a trailing :cloud tag", () => {
 test("displayModel: leaves other tags (and untagged names) alone", () => {
   assert.equal(displayModel("qwen3.8:latest"), "qwen3.8:latest");
   assert.equal(displayModel("qwen3-coder:30b"), "qwen3-coder:30b");
-  assert.equal(displayModel("ornith:35b"), "ornith:35b");
+  assert.equal(displayModel("tiny:1b"), "tiny:1b");
   assert.equal(displayModel("some-model-with-no-tag"), "some-model-with-no-tag");
 });
 

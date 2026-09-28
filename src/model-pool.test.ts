@@ -109,6 +109,6 @@ test("pickSpecialistModel: uses the smallModel for the routing call, not any poo
       return finalResponse("deepseek-r1:8b");
     },
   } as unknown as Ollama;
-  await pickSpecialistModel(client, "hard reasoning task", POOL, "ornith:35b");
-  assert.equal(calledWithModel, "ornith:35b");
+  await pickSpecialistModel(client, "hard reasoning task", POOL, "tiny:1b");
+  assert.equal(calledWithModel, "tiny:1b");
 });

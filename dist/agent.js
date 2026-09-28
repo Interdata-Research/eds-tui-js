@@ -48,8 +48,10 @@ export const FINAL_ANSWER_NUDGE = "You have used the entire tool-call budget for
  * tools to main and to any specialist alike, and restricts only the one
  * model that should actually be restricted.
  */
-export function toolsFor(activeModel, smallModel, hasSpecialistPool) {
-    if (activeModel === smallModel)
+export function toolsFor(activeModel, mainModel, smallModel, hasSpecialistPool) {
+    // When no separate small model is configured, small === main and the main
+    // model must keep its full tool set.
+    if (activeModel === smallModel && smallModel !== mainModel)
         return SHELL_TOOLS;
     const tools = [RUN_COMMAND_TOOL, DELEGATE_TOOL, DELEGATE_TASKS_TOOL, CREATE_SKILL_TOOL];
     // Gated the same way LOAD_SKILL_TOOL is gated on skills.discover().size > 0
@@ -231,7 +233,8 @@ export async function agenticLoop(deps, messages, initialActiveModel, stats = {}
             // extra increment happens since we don't `continue` back to the loop
             // top).
         }
-        if (activeModel === deps.smallModel && turns > smallMaxTurns) {
+        const onSmallTier = activeModel === deps.smallModel && deps.smallModel !== deps.mainModel;
+        if (onSmallTier && turns > smallMaxTurns) {
             ui.printEscalating(deps.mainModel);
             activeModel = deps.mainModel;
             stats.escalated = true;
@@ -251,12 +254,12 @@ export async function agenticLoop(deps, messages, initialActiveModel, stats = {}
             response = await ui.withSpinner("Thinking...", () => deps.client.chat({
                 model: activeModel,
                 messages,
-                tools: toolsFor(activeModel, deps.smallModel, (deps.modelPool?.length ?? 0) > 0),
+                tools: toolsFor(activeModel, deps.mainModel, deps.smallModel, (deps.modelPool?.length ?? 0) > 0),
             }));
         }
         catch (e) {
             const message = e instanceof Error ? e.message : String(e);
-            if (activeModel === deps.smallModel) {
+            if (activeModel === deps.smallModel && deps.smallModel !== deps.mainModel) {
                 ui.printEscalatingOnFailure(deps.smallModel, deps.mainModel, message);
                 activeModel = deps.mainModel;
                 stats.escalated = true;

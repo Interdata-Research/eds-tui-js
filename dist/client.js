@@ -17,19 +17,18 @@ import { Ollama } from "ollama";
 import { Agent, fetch as undiciFetch } from "undici";
 import { loadCredentials } from "./credentials.js";
 export const DEFAULT_MAIN_MODEL = "qwen3.8:latest";
-export const DEFAULT_SMALL_MODEL = "ornith:35b";
 export const DEFAULT_MINICLOSEDAI_URL = "https://127.0.0.1:8095";
 export const DEFAULT_HOST = "http://192.168.0.110:11434";
 /** The main/small model names the caller *wants*: env first, package defaults
- *  otherwise. `.trim() ||` rather than `??` on purpose — an empty or
+ *  otherwise. There is no separate default small model — unless
+ *  EDS_TUI_SMALL_MODEL is set, the "small" role is just the main model, so
+ *  every request runs on it. `.trim() ||` rather than `??` on purpose — an empty or
  *  whitespace-only value must fall back to the default rather than ask the
  *  relay for a model literally named "", which is what
  *  `printf 'export EDS_TUI_MODEL=%q' ""` in an installer would hand us. */
 export function desiredModels(env) {
-    return {
-        main: env.EDS_TUI_MODEL?.trim() || DEFAULT_MAIN_MODEL,
-        small: env.EDS_TUI_SMALL_MODEL?.trim() || DEFAULT_SMALL_MODEL,
-    };
+    const main = env.EDS_TUI_MODEL?.trim() || DEFAULT_MAIN_MODEL;
+    return { main, small: env.EDS_TUI_SMALL_MODEL?.trim() || main };
 }
 // miniclosedai's dev.sh serves its own API over self-signed TLS by default
 // (https://<host>:8095) — same trust model already used elsewhere for
@@ -44,7 +43,8 @@ function stripTrailingSlashes(url) {
 /**
  * Which main/small model names to actually use, given what a relay reports
  * as available. Prefers the desired names when the relay actually has them;
- * otherwise falls back to whatever it does have. Pulled out as a pure
+ * otherwise main falls back to whatever it does have, and small falls back
+ * to main (never to some unrelated model the relay happens to list). Pulled out as a pure
  * function so this precedence is unit-testable without a live server.
  */
 export function pickModels(names, desiredMain, desiredSmall) {
@@ -52,8 +52,7 @@ export function pickModels(names, desiredMain, desiredSmall) {
         throw new Error("miniclosedai relay reported no models");
     }
     const main = names.includes(desiredMain) ? desiredMain : names[0];
-    const remaining = names.filter((n) => n !== main);
-    const small = names.includes(desiredSmall) ? desiredSmall : remaining[0] ?? main;
+    const small = names.includes(desiredSmall) ? desiredSmall : main;
     return { main, small };
 }
 async function resolveViaMiniclosedai(desiredMain, desiredSmall, env) {
@@ -108,7 +107,7 @@ export function fallbackClient(desiredMain, desiredSmall, env, credentialsPath) 
     const client = new Ollama({ host, headers });
     return { client, mainModel: desiredMain, smallModel: desiredSmall };
 }
-export async function makeClient(desiredMain = DEFAULT_MAIN_MODEL, desiredSmall = DEFAULT_SMALL_MODEL, env = process.env) {
+export async function makeClient(desiredMain = DEFAULT_MAIN_MODEL, desiredSmall = desiredMain, env = process.env) {
     try {
         return await resolveViaMiniclosedai(desiredMain, desiredSmall, env);
     }

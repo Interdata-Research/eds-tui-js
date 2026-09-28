@@ -41,7 +41,8 @@ export EDS_TUI_URL="http://your-ollama-host:11434"
 export EDS_TUI_TOKEN="your_token_here"   # optional, only if your server requires auth
 
 export EDS_TUI_MODEL="qwen3.8:latest"    # optional, main model
-export EDS_TUI_SMALL_MODEL="ornith:35b"  # optional, model for simpler requests
+export EDS_TUI_SMALL_MODEL="..."          # optional, a faster model for simpler requests;
+                                         # unset = every request runs on EDS_TUI_MODEL
 ```
 
 Both models must be served from the same Ollama host and support tool calling.
@@ -82,7 +83,7 @@ already writes to `~/.bash_aliases`. Each run of `ask`:
    interdata relay currently has.
 2. If that succeeds, runs against interdata through miniclosedai's `/relay`
    proxy — preferring `EDS_TUI_MODEL`/`EDS_TUI_SMALL_MODEL` (or their
-   `qwen3.8:latest`/`ornith:35b` defaults) if interdata actually has them,
+   `qwen3.8:latest` default) if interdata actually has them,
    else falling back to whatever models interdata does have.
 3. If miniclosedai isn't reachable, or interdata isn't connected/enabled,
    `ask` falls straight back to `EDS_TUI_URL`/`EDS_TUI_TOKEN` above, silently

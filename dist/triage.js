@@ -22,6 +22,9 @@ function skillMatchSystem(index) {
 }
 /** Which model should own this request. Falls back to the main model on any doubt. */
 export async function classifyComplexity(client, userInput, mainModel, smallModel) {
+    // No separate small model configured — nothing to route between.
+    if (smallModel === mainModel)
+        return mainModel;
     let verdict;
     try {
         const response = await client.chat({

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pickModels, fallbackClient, desiredModels, DEFAULT_HOST, DEFAULT_MAIN_MODEL, DEFAULT_SMALL_MODEL } from "./client.js";
+import { pickModels, fallbackClient, desiredModels, DEFAULT_HOST, DEFAULT_MAIN_MODEL } from "./client.js";
 import { saveCredentials } from "./credentials.js";
 
 function withTempCredentialsPath(fn: (path: string) => void): void {
@@ -18,33 +18,33 @@ function withTempCredentialsPath(fn: (path: string) => void): void {
 
 test("prefers the desired main/small names when the relay actually has them", () => {
   const { main, small } = pickModels(
-    ["ornith:35b", "qwen3.8:latest", "llama3.2:3b"],
+    ["tiny:1b", "qwen3.8:latest", "llama3.2:3b"],
     "qwen3.8:latest",
-    "ornith:35b"
+    "tiny:1b"
   );
   assert.equal(main, "qwen3.8:latest");
-  assert.equal(small, "ornith:35b");
+  assert.equal(small, "tiny:1b");
 });
 
 test("falls back to the first available name when the desired main isn't present", () => {
-  const { main } = pickModels(["llama3.2:3b", "mistral:7b"], "qwen3.8:latest", "ornith:35b");
+  const { main } = pickModels(["llama3.2:3b", "mistral:7b"], "qwen3.8:latest", "tiny:1b");
   assert.equal(main, "llama3.2:3b");
 });
 
-test("falls back to a remaining name (excluding main) when the desired small isn't present", () => {
-  const { main, small } = pickModels(["llama3.2:3b", "mistral:7b"], "llama3.2:3b", "ornith:35b");
+test("falls back to main itself (not some other listed model) when the desired small isn't present", () => {
+  const { main, small } = pickModels(["llama3.2:3b", "mistral:7b"], "llama3.2:3b", "tiny:1b");
   assert.equal(main, "llama3.2:3b");
-  assert.equal(small, "mistral:7b");
+  assert.equal(small, "llama3.2:3b");
 });
 
 test("single-model relay: small falls back to main itself", () => {
-  const { main, small } = pickModels(["only-model:latest"], "qwen3.8:latest", "ornith:35b");
+  const { main, small } = pickModels(["only-model:latest"], "qwen3.8:latest", "tiny:1b");
   assert.equal(main, "only-model:latest");
   assert.equal(small, "only-model:latest");
 });
 
 test("empty model list throws, matching the Python original's RuntimeError", () => {
-  assert.throws(() => pickModels([], "qwen3.8:latest", "ornith:35b"), /reported no models/);
+  assert.throws(() => pickModels([], "qwen3.8:latest", "tiny:1b"), /reported no models/);
 });
 
 // ---------- fallbackClient: env vars vs. saved `ask --login` credentials ----------
@@ -92,10 +92,10 @@ test("fallbackClient: EDS_TUI_URL set alone (no token env var) still wins over a
   });
 });
 
-test("desiredModels: unset env falls back to the package defaults", () => {
+test("desiredModels: unset env falls back to the package default, and small is just main", () => {
   const { main, small } = desiredModels({});
   assert.equal(main, DEFAULT_MAIN_MODEL);
-  assert.equal(small, DEFAULT_SMALL_MODEL);
+  assert.equal(small, DEFAULT_MAIN_MODEL);
 });
 
 test("desiredModels: EDS_TUI_MODEL / EDS_TUI_SMALL_MODEL are honored when set", () => {
@@ -112,7 +112,7 @@ test("desiredModels: empty or whitespace-only values fall back rather than reque
   // this, and asking the relay for "" would 404 every run.
   const { main, small } = desiredModels({ EDS_TUI_MODEL: "", EDS_TUI_SMALL_MODEL: "   " });
   assert.equal(main, DEFAULT_MAIN_MODEL);
-  assert.equal(small, DEFAULT_SMALL_MODEL);
+  assert.equal(small, DEFAULT_MAIN_MODEL);
 });
 
 test("desiredModels: surrounding whitespace is trimmed off a real value", () => {

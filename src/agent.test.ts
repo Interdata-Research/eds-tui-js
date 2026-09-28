@@ -377,7 +377,7 @@ test("consult_specialist dispatches to deps.consultSpecialist and increments sta
 });
 
 test("toolsFor: the small model always gets shell-only tools, regardless of skills installed or a pool being configured", () => {
-  const tools = toolsFor(SMALL, SMALL, true);
+  const tools = toolsFor(SMALL, MAIN, SMALL, true);
   assert.deepEqual(
     tools.map((t) => t.function.name),
     ["run_command"]
@@ -389,7 +389,7 @@ test("toolsFor: the main model gets the full set, minus load_skill when no skill
   const realDir = skills.SKILLS_DIR;
   skills.setSkillsDir(tmp);
   try {
-    const names = toolsFor(MAIN, SMALL, false).map((t) => t.function.name);
+    const names = toolsFor(MAIN, MAIN, SMALL, false).map((t) => t.function.name);
     assert.deepEqual(names, ["run_command", "delegate_task", "delegate_tasks", "create_skill"]);
   } finally {
     skills.setSkillsDir(realDir);
@@ -406,7 +406,7 @@ test("toolsFor: the main model gets load_skill added once at least one skill exi
     writeFileSync(join(tmp, "x", "SKILL.md"), "---\ndescription: x.\n---\n\nx.\n");
     skills.resetCache();
 
-    const names = toolsFor(MAIN, SMALL, false).map((t) => t.function.name);
+    const names = toolsFor(MAIN, MAIN, SMALL, false).map((t) => t.function.name);
     assert.deepEqual(names, ["run_command", "delegate_task", "delegate_tasks", "create_skill", "load_skill"]);
   } finally {
     skills.setSkillsDir(realDir);
@@ -419,7 +419,7 @@ test("toolsFor: a third (specialist) model that is neither main nor small also g
   const realDir = skills.SKILLS_DIR;
   skills.setSkillsDir(tmp);
   try {
-    const tools = toolsFor("some-specialist-model:8b", SMALL, false);
+    const tools = toolsFor("some-specialist-model:8b", MAIN, SMALL, false);
     assert.deepEqual(
       tools.map((t) => t.function.name),
       ["run_command", "delegate_task", "delegate_tasks", "create_skill"]
@@ -435,14 +435,14 @@ test("toolsFor: consult_specialist is added for the main model (and a third spec
   const realDir = skills.SKILLS_DIR;
   skills.setSkillsDir(tmp);
   try {
-    assert.deepEqual(toolsFor(MAIN, SMALL, true).map((t) => t.function.name), [
+    assert.deepEqual(toolsFor(MAIN, MAIN, SMALL, true).map((t) => t.function.name), [
       "run_command",
       "delegate_task",
       "delegate_tasks",
       "create_skill",
       "consult_specialist",
     ]);
-    assert.deepEqual(toolsFor("some-specialist-model:8b", SMALL, true).map((t) => t.function.name), [
+    assert.deepEqual(toolsFor("some-specialist-model:8b", MAIN, SMALL, true).map((t) => t.function.name), [
       "run_command",
       "delegate_task",
       "delegate_tasks",

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { pinFor, resolveModel, type TriageFn } from "./resolve-model.js";
 import type { Skill } from "./types.js";
 
-const MODELS = { main: "qwen3.8:latest", small: "ornith:35b" };
+const MODELS = { main: "qwen3.8:latest", small: "tiny:1b" };
 
 function makeSkill(model: Skill["model"]): Skill {
   return { name: "selfcheck-widget", description: "x", model, body: "x", dir: "/tmp/x" };

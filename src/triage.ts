@@ -36,6 +36,8 @@ export async function classifyComplexity(
   mainModel: string,
   smallModel: string
 ): Promise<string> {
+  // No separate small model configured — nothing to route between.
+  if (smallModel === mainModel) return mainModel;
   let verdict: string;
   try {
     const response = await client.chat({

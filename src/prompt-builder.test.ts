@@ -41,7 +41,7 @@ test("other-skills index only shown when activeModel === mainModel (never for th
   assert.match(forMain, /Other skills you can load/);
   assert.match(forMain, /- foo: does foo/);
 
-  const forSmall = buildSystemPrompt({ ...withIndex, activeModel: "ornith:35b" });
+  const forSmall = buildSystemPrompt({ ...withIndex, activeModel: "tiny:1b" });
   assert.doesNotMatch(forSmall, /Other skills you can load/);
 });
 

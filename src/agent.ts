@@ -65,8 +65,10 @@ export const FINAL_ANSWER_NUDGE =
  * tools to main and to any specialist alike, and restricts only the one
  * model that should actually be restricted.
  */
-export function toolsFor(activeModel: string, smallModel: string, hasSpecialistPool: boolean): Tool[] {
-  if (activeModel === smallModel) return SHELL_TOOLS;
+export function toolsFor(activeModel: string, mainModel: string, smallModel: string, hasSpecialistPool: boolean): Tool[] {
+  // When no separate small model is configured, small === main and the main
+  // model must keep its full tool set.
+  if (activeModel === smallModel && smallModel !== mainModel) return SHELL_TOOLS;
   const tools: Tool[] = [RUN_COMMAND_TOOL, DELEGATE_TOOL, DELEGATE_TASKS_TOOL, CREATE_SKILL_TOOL];
   // Gated the same way LOAD_SKILL_TOOL is gated on skills.discover().size > 0
   // — no point offering a tool that can only ever reply "no pool configured".
@@ -327,7 +329,8 @@ export async function agenticLoop(
       // top).
     }
 
-    if (activeModel === deps.smallModel && turns > smallMaxTurns) {
+    const onSmallTier = activeModel === deps.smallModel && deps.smallModel !== deps.mainModel;
+    if (onSmallTier && turns > smallMaxTurns) {
       ui.printEscalating(deps.mainModel);
       activeModel = deps.mainModel;
       stats.escalated = true;
@@ -351,12 +354,12 @@ export async function agenticLoop(
         deps.client.chat({
           model: activeModel,
           messages,
-          tools: toolsFor(activeModel, deps.smallModel, (deps.modelPool?.length ?? 0) > 0),
+          tools: toolsFor(activeModel, deps.mainModel, deps.smallModel, (deps.modelPool?.length ?? 0) > 0),
         })
       );
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      if (activeModel === deps.smallModel) {
+      if (activeModel === deps.smallModel && deps.smallModel !== deps.mainModel) {
         ui.printEscalatingOnFailure(deps.smallModel, deps.mainModel, message);
         activeModel = deps.mainModel;
         stats.escalated = true;
