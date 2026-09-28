@@ -15,7 +15,10 @@ import { spawnSync } from "node:child_process";
 import * as ui from "./ui.js";
 export function selfUpgrade() {
     ui.say("\n  Upgrading eds-tui from npm...\n");
-    const r = spawnSync("npm", ["install", "-g", "eds-tui@latest", "--no-fund", "--no-audit"], {
+    // --prefer-online: without it npm can resolve @latest from a stale cached
+    // packument and "upgrade" to the version already installed right after a
+    // fresh publish.
+    const r = spawnSync("npm", ["install", "-g", "eds-tui@latest", "--prefer-online", "--no-fund", "--no-audit"], {
         stdio: "inherit",
     });
     if (r.status === 0) {

@@ -1,6 +1,6 @@
 {
   "name": "eds-tui",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "description": "Ed's terminal AI assistant — your LLM. Natural language command executor for a local Ollama model.",
   "type": "module",
   "license": "MIT",

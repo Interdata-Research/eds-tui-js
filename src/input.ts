@@ -12,7 +12,10 @@
 // small CSI/ANSI state machine, deliberately narrower in scope than a
 // general terminal emulator or full readline parity: only what the Python
 // original's actual configured keybindings cover (arrow-key cursor
-// movement, Home/End/Delete, backspace, Ctrl-C, Ctrl-D-on-empty-buffer).
+// movement, Home/End/Delete, backspace, Ctrl-C, Ctrl-D-on-empty-buffer),
+// plus word-wise movement on Ctrl/Alt+Left/Right (and Alt-b/Alt-f).
+// Any other escape sequence is consumed whole and ignored, so an unbound
+// key never leaks its bytes (e.g. "[1;5D") into the buffer.
 //
 // Known, accepted scope limits (documented rather than silently hoped past):
 //   - Cursor/backspace math treats the buffer as a plain JS string (UTF-16
@@ -75,6 +78,91 @@ export function spliceBackPastes(finalLine: string, pastedBlocks: string[]): str
     return pastedBlocks[i++]!;
   });
   return spliced.trim();
+}
+
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
+/** Cursor position after moving one word left, readline-style: skip non-word chars, then the word. */
+export function wordLeft(buf: string, cursor: number): number {
+  let i = cursor;
+  while (i > 0 && !WORD_CHAR.test(buf[i - 1]!)) i--;
+  while (i > 0 && WORD_CHAR.test(buf[i - 1]!)) i--;
+  return i;
+}
+
+/** Cursor position after moving one word right, readline-style: skip non-word chars, then the word. */
+export function wordRight(buf: string, cursor: number): number {
+  let i = cursor;
+  while (i < buf.length && !WORD_CHAR.test(buf[i]!)) i++;
+  while (i < buf.length && WORD_CHAR.test(buf[i]!)) i++;
+  return i;
+}
+
+export type EscapeKey = "left" | "right" | "wordLeft" | "wordRight" | "home" | "end" | "delete" | null;
+
+/**
+ * Parse one escape sequence at the start of `s` (which begins with ESC).
+ * Returns the key it maps to (null = recognized as a complete sequence but
+ * unbound, to be ignored) and how many chars it spans, or `incomplete` when
+ * `s` ends mid-sequence and more bytes are needed.
+ *
+ * CSI modifier params follow xterm: `ESC [1;<m><final>` where m-1 is a
+ * bitmask (1 shift, 2 alt, 4 ctrl). Any alt/ctrl modifier on Left/Right means
+ * word movement; shift alone is treated as a plain arrow.
+ */
+export function parseEscape(s: string): { key: EscapeKey; length: number } | "incomplete" {
+  if (s.length < 2) return "incomplete";
+  const second = s[1]!;
+
+  if (second === "[") {
+    let j = 2;
+    // Parameter bytes 0x30–0x3F, then intermediate bytes 0x20–0x2F.
+    while (j < s.length && s.charCodeAt(j) >= 0x30 && s.charCodeAt(j) <= 0x3f) j++;
+    while (j < s.length && s.charCodeAt(j) >= 0x20 && s.charCodeAt(j) <= 0x2f) j++;
+    if (j >= s.length) return "incomplete";
+    const final = s[j]!;
+    const params = s.slice(2, j).split(";");
+    const length = j + 1;
+    const mod = Number(params[1] ?? "1") - 1;
+    const wordwise = (mod & 0b110) !== 0;
+    switch (final) {
+      case "C":
+        return { key: wordwise ? "wordRight" : "right", length };
+      case "D":
+        return { key: wordwise ? "wordLeft" : "left", length };
+      case "H":
+        return { key: "home", length };
+      case "F":
+        return { key: "end", length };
+      case "~":
+        if (params[0] === "1" || params[0] === "7") return { key: "home", length };
+        if (params[0] === "4" || params[0] === "8") return { key: "end", length };
+        if (params[0] === "3") return { key: "delete", length };
+        return { key: null, length };
+      default:
+        return { key: null, length };
+    }
+  }
+
+  if (second === "O") {
+    if (s.length < 3) return "incomplete";
+    const byFinal: Record<string, EscapeKey> = {
+      C: "right",
+      D: "left",
+      H: "home",
+      F: "end",
+      c: "wordRight", // rxvt Ctrl+Right
+      d: "wordLeft", // rxvt Ctrl+Left
+    };
+    return { key: byFinal[s[2]!] ?? null, length: 3 };
+  }
+
+  // Meta-prefixed keys: Alt-b / Alt-f (what macOS terminals send for Option+Left/Right).
+  if (second === "b") return { key: "wordLeft", length: 2 };
+  if (second === "f") return { key: "wordRight", length: 2 };
+
+  // A bare ESC (or ESC + something unbound): drop just the ESC.
+  return { key: null, length: 1 };
 }
 
 export interface PromptResult {
@@ -203,55 +291,36 @@ export function promptLine(promptText: string): Promise<PromptResult> {
         }
 
         if (ch === "\x1b") {
-          if (rest.length < 3) {
+          const parsed = parseEscape(rest);
+          if (parsed === "incomplete") {
             pending = rest;
             return;
           }
-          if (rest.startsWith("\x1b[C")) {
-            if (cursor < buf.length) cursor += 1;
-            render();
-            i += 3;
-            continue;
+          switch (parsed.key) {
+            case "left":
+              if (cursor > 0) cursor -= 1;
+              break;
+            case "right":
+              if (cursor < buf.length) cursor += 1;
+              break;
+            case "wordLeft":
+              cursor = wordLeft(buf, cursor);
+              break;
+            case "wordRight":
+              cursor = wordRight(buf, cursor);
+              break;
+            case "home":
+              cursor = 0;
+              break;
+            case "end":
+              cursor = buf.length;
+              break;
+            case "delete":
+              if (cursor < buf.length) buf = buf.slice(0, cursor) + buf.slice(cursor + 1);
+              break;
           }
-          if (rest.startsWith("\x1b[D")) {
-            if (cursor > 0) cursor -= 1;
-            render();
-            i += 3;
-            continue;
-          }
-          if (rest.startsWith("\x1b[H") || rest.startsWith("\x1bOH")) {
-            cursor = 0;
-            render();
-            i += 3;
-            continue;
-          }
-          if (rest.startsWith("\x1b[F") || rest.startsWith("\x1bOF")) {
-            cursor = buf.length;
-            render();
-            i += 3;
-            continue;
-          }
-          if (rest.startsWith("\x1b[1~")) {
-            cursor = 0;
-            render();
-            i += 4;
-            continue;
-          }
-          if (rest.startsWith("\x1b[4~")) {
-            cursor = buf.length;
-            render();
-            i += 4;
-            continue;
-          }
-          if (rest.startsWith("\x1b[3~")) {
-            if (cursor < buf.length) buf = buf.slice(0, cursor) + buf.slice(cursor + 1);
-            render();
-            i += 4;
-            continue;
-          }
-          // Unrecognized escape sequence — swallow just the ESC byte, not the
-          // whole rest of the chunk, and keep scanning.
-          i += 1;
+          if (parsed.key) render();
+          i += parsed.length;
           continue;
         }
 

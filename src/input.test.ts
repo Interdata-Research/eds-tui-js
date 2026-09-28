@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyPaste, spliceBackPastes } from "./input.js";
+import { classifyPaste, spliceBackPastes, parseEscape, wordLeft, wordRight } from "./input.js";
 
 test("classifyPaste: multi-line paste (2+ non-blank lines) collapses to a placeholder", () => {
   const result = classifyPaste("line one\nline two\nline three");
@@ -66,4 +66,49 @@ test("spliceBackPastes: no placeholders — line passes through trimmed, unchang
 test("spliceBackPastes: trims the final result", () => {
   const result = spliceBackPastes("  [+1 lines]  ", ["x"]);
   assert.equal(result, "x");
+});
+
+// ---------- escape sequences / word movement ----------
+
+test("parseEscape: Ctrl+Left/Right (xterm ESC[1;5D / ESC[1;5C) are word moves, consuming the whole sequence", () => {
+  assert.deepEqual(parseEscape("\x1b[1;5D"), { key: "wordLeft", length: 6 });
+  assert.deepEqual(parseEscape("\x1b[1;5Cabc"), { key: "wordRight", length: 6 });
+});
+
+test("parseEscape: Alt+arrows and Alt-b/f are word moves; plain and Shift+arrows move one char", () => {
+  assert.deepEqual(parseEscape("\x1b[1;3D"), { key: "wordLeft", length: 6 });
+  assert.deepEqual(parseEscape("\x1bb"), { key: "wordLeft", length: 2 });
+  assert.deepEqual(parseEscape("\x1bf"), { key: "wordRight", length: 2 });
+  assert.deepEqual(parseEscape("\x1b[D"), { key: "left", length: 3 });
+  assert.deepEqual(parseEscape("\x1b[1;2C"), { key: "right", length: 6 });
+  assert.deepEqual(parseEscape("\x1bOd"), { key: "wordLeft", length: 3 });
+});
+
+test("parseEscape: Home/End/Delete variants", () => {
+  assert.deepEqual(parseEscape("\x1b[H"), { key: "home", length: 3 });
+  assert.deepEqual(parseEscape("\x1bOF"), { key: "end", length: 3 });
+  assert.deepEqual(parseEscape("\x1b[7~"), { key: "home", length: 4 });
+  assert.deepEqual(parseEscape("\x1b[3~"), { key: "delete", length: 4 });
+});
+
+test("parseEscape: unbound CSI sequences are swallowed whole, never leaking bytes into the buffer", () => {
+  assert.deepEqual(parseEscape("\x1b[1;5A"), { key: null, length: 6 }); // Ctrl+Up
+  assert.deepEqual(parseEscape("\x1b[15~"), { key: null, length: 5 }); // F5
+});
+
+test("parseEscape: a sequence cut off at the end of a chunk is incomplete", () => {
+  assert.equal(parseEscape("\x1b"), "incomplete");
+  assert.equal(parseEscape("\x1b[1;5"), "incomplete");
+  assert.equal(parseEscape("\x1bO"), "incomplete");
+});
+
+test("wordLeft/wordRight: jump over the adjacent word, skipping separators first", () => {
+  const s = "asdfa asdf  asdfas d";
+  assert.equal(wordLeft(s, s.length), 19);
+  assert.equal(wordLeft(s, 19), 12);
+  assert.equal(wordLeft(s, 8), 6);
+  assert.equal(wordLeft(s, 0), 0);
+  assert.equal(wordRight(s, 0), 5);
+  assert.equal(wordRight(s, 5), 10);
+  assert.equal(wordRight(s, s.length), s.length);
 });
