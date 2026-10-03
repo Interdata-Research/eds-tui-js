@@ -15,7 +15,9 @@ npm install -g eds-tui@latest
 
 Needs Node.js >=20. This gives you the `ask` command on PATH. `ask --upgrade`
 pulls from the same place, so install and upgrade always agree on what
-"latest" means.
+"latest" means. When npm is behind GitHub or unreachable,
+`ask --github-upgrade` installs the current `main` from GitHub instead
+(needs `git`).
 
 If the npm registry isn't reachable (air-gapped, proxy, outage) or you need
 something newer than what's published, there's a fallback installer that
@@ -108,6 +110,8 @@ ask --whoami         # show the saved login and re-check it still works
 ask --logout         # remove the saved login
 ask --test           # self-check: prove routing, skills, delegation, escalation, specialist routing and consult work
 ask --upgrade        # update to the latest published version (npm install -g eds-tui@latest)
+ask --github-upgrade # update straight from GitHub (main) instead — no npm registry or login involved
+ask --github-upgrade owner/repo   # ...or from another copy of the repo (owner/repo, a git URL, or a local path)
 ask --version        # print the installed version and exit
 ```
 

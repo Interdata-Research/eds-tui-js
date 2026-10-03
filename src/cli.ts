@@ -24,7 +24,7 @@ import { loadPool } from "./model-pool.js";
 import * as skills from "./skills.js";
 import * as ui from "./ui.js";
 import { promptLine } from "./input.js";
-import { selfUpgrade } from "./upgrade.js";
+import { selfUpgrade, githubUpgrade } from "./upgrade.js";
 import type { RunStats, Skill } from "./types.js";
 
 // Where this running copy's source actually lives, regardless of the
@@ -162,6 +162,10 @@ async function main(): Promise<void> {
   skills.seedDefaultSkills();
 
   if (argv.includes("--upgrade")) selfUpgrade();
+  if (argv.includes("--github-upgrade")) {
+    const next = argv[argv.indexOf("--github-upgrade") + 1];
+    githubUpgrade(next && !next.startsWith("--") ? next : undefined);
+  }
 
   if (argv.includes("--skills")) {
     printSkills();
