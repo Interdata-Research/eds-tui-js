@@ -31,7 +31,8 @@ import { makeConsultSpecialist } from "./consult.js";
 import { clipOutput, MAX_OUTPUT_CHARS } from "./clip.js";
 import { runCommandOnce } from "./exec.js";
 import * as skills from "./skills.js";
-import { displayModel } from "./ui.js";
+import { displayModel, printRetrying } from "./ui.js";
+import { withRetries } from "./retry.js";
 
 const SIMPLE_PROBE = "how many .py files are in this directory";
 const COMPLEX_PROBE =
@@ -104,6 +105,7 @@ export async function selfCheck(): Promise<void> {
   // the two entry points can't disagree about which model was asked for.
   const { main, small } = desiredModels(process.env);
   const { client, mainModel, smallModel } = await makeClient(main, small, process.env);
+  withRetries(client, { onRetry: printRetrying });
   const startedAll = Date.now();
   const results: boolean[] = [];
 

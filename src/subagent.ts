@@ -16,6 +16,7 @@
 //     console output differs, not just the returned text.
 
 import type { Ollama, Message } from "ollama";
+import { describeError } from "./retry.js";
 import { runCommand } from "./exec.js";
 import { SHELL_TOOLS } from "./tools.js";
 import { FINAL_ANSWER_NUDGE, type DelegateTaskFn } from "./agent.js";
@@ -64,7 +65,7 @@ export function makeDelegateTask(smallModel: string, cwd: string, appDir: string
           client.chat({ model: smallModel, messages, tools: SHELL_TOOLS })
         );
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
+        const message = describeError(e);
         ui.printSubagentFailure(message);
         return `Delegation failed: ${message}. Handle this subtask yourself.`;
       }

@@ -16,6 +16,7 @@
 //      it keeps counting from wherever it already was. These are two
 //      different code paths in the Python original with different reset
 //      behavior; conflating them would be a real, subtle bug.
+import { describeError } from "./retry.js";
 import * as skills from "./skills.js";
 import { runCommandOnce } from "./exec.js";
 import { RUN_COMMAND_TOOL, DELEGATE_TOOL, DELEGATE_TASKS_TOOL, LOAD_SKILL_TOOL, CREATE_SKILL_TOOL, CONSULT_SPECIALIST_TOOL, SHELL_TOOLS, } from "./tools.js";
@@ -92,7 +93,7 @@ function createSkill(args) {
         });
     }
     catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
+        const message = describeError(e);
         ui.printCreateSkillError(message);
         return `create_skill failed: ${message}`;
     }
@@ -146,7 +147,7 @@ export async function finalAnswer(deps, messages, activeModel) {
         }));
     }
     catch (e) {
-        ui.printCouldNotProduceFinalAnswer(e instanceof Error ? e.message : String(e));
+        ui.printCouldNotProduceFinalAnswer(describeError(e));
         deps.saveHistory(messages);
         return null;
     }
@@ -258,7 +259,7 @@ export async function agenticLoop(deps, messages, initialActiveModel, stats = {}
             }));
         }
         catch (e) {
-            const message = e instanceof Error ? e.message : String(e);
+            const message = describeError(e);
             if (activeModel === deps.smallModel && deps.smallModel !== deps.mainModel) {
                 ui.printEscalatingOnFailure(deps.smallModel, deps.mainModel, message);
                 activeModel = deps.mainModel;

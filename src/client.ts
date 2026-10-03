@@ -49,6 +49,27 @@ const insecureAgent = new Agent({ connect: { rejectUnauthorized: false } });
 const insecureFetch = ((input: any, init?: any) =>
   undiciFetch(input, { ...init, dispatcher: insecureAgent })) as typeof fetch;
 
+/**
+ * Rewrite a non-JSON error reply (an nginx "502 Bad Gateway" HTML page) as
+ * the JSON error ollama-js expects. Otherwise ollama-js console.logs
+ * "Getting text from response" into the UI and puts the whole HTML document
+ * in the error message.
+ */
+export function jsonErrors(inner: typeof fetch): typeof fetch {
+  return (async (input: any, init?: any) => {
+    const res = await inner(input, init);
+    if (res.ok || res.headers.get("content-type")?.includes("application/json")) return res;
+    const body = await res.text().catch(() => "");
+    const title = /<title>([^<]*)<\/title>/i.exec(body)?.[1]?.trim();
+    const error = title ? `HTTP ${title}` : body.replace(/\s+/g, " ").trim().slice(0, 300) || `HTTP ${res.status} ${res.statusText}`;
+    return new Response(JSON.stringify({ error }), {
+      status: res.status,
+      statusText: res.statusText,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+}
+
 function stripTrailingSlashes(url: string): string {
   return url.replace(/\/+$/, "");
 }
@@ -105,7 +126,7 @@ async function resolveViaMiniclosedai(
   // passes an AbortSignal itself, which already matches Python's explicit
   // `timeout=None` (wait indefinitely for a long generation). Nothing to
   // configure here for parity.
-  const client = new Ollama({ host: `${base}/relay/`, headers, fetch: insecureFetch });
+  const client = new Ollama({ host: `${base}/relay/`, headers, fetch: jsonErrors(insecureFetch) });
   return { client, mainModel: main, smallModel: small };
 }
 
@@ -140,7 +161,7 @@ export function fallbackClient(
   }
 
   const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const client = new Ollama({ host, headers });
+  const client = new Ollama({ host, headers, fetch: jsonErrors(fetch) });
   return { client, mainModel: desiredMain, smallModel: desiredSmall };
 }
 

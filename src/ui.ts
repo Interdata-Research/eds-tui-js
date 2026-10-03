@@ -197,6 +197,10 @@ export function printBudgetSpent(): void {
   console.log();
 }
 
+export function printRetrying(attempt: number, retries: number, reason: string): void {
+  console.log(chalk.yellow(`  Model request failed (${reason}) — retrying (${attempt}/${retries}), possibly on another node...`));
+}
+
 export function printCouldNotProduceFinalAnswer(message: string): void {
   console.log(chalk.red(`  Could not produce a final answer: ${message}`));
   console.log();

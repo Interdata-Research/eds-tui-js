@@ -14,6 +14,7 @@
 //     loop's run_command_once, which always echoes the command first. This
 //     is why subagent.ts does NOT reuse exec.ts's runCommandOnce: the
 //     console output differs, not just the returned text.
+import { describeError } from "./retry.js";
 import { runCommand } from "./exec.js";
 import { SHELL_TOOLS } from "./tools.js";
 import { FINAL_ANSWER_NUDGE } from "./agent.js";
@@ -53,7 +54,7 @@ export function makeDelegateTask(smallModel, cwd, appDir) {
                 response = await ui.withSpinner(`${SUB_INDENT}${ui.displayModel(smallModel)} working...`, () => client.chat({ model: smallModel, messages, tools: SHELL_TOOLS }));
             }
             catch (e) {
-                const message = e instanceof Error ? e.message : String(e);
+                const message = describeError(e);
                 ui.printSubagentFailure(message);
                 return `Delegation failed: ${message}. Handle this subtask yourself.`;
             }

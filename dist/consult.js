@@ -13,6 +13,7 @@
 // view of the parent conversation, same salvage-on-exhaustion pattern via
 // FINAL_ANSWER_NUDGE) — but the model running the loop is picked per call
 // from the pool via pickSpecialistModel, not a fixed smallModel.
+import { describeError } from "./retry.js";
 import { runCommand } from "./exec.js";
 import { SHELL_TOOLS } from "./tools.js";
 import { FINAL_ANSWER_NUDGE } from "./agent.js";
@@ -64,7 +65,7 @@ export function makeConsultSpecialist(pool, smallModel, cwd, appDir) {
                 response = await ui.withSpinner(`${CONSULT_INDENT}${ui.displayModel(specialist)} working...`, () => client.chat({ model: specialist, messages, tools: SHELL_TOOLS }));
             }
             catch (e) {
-                const message = e instanceof Error ? e.message : String(e);
+                const message = describeError(e);
                 ui.printConsultFailure(message);
                 return `Consult with ${specialist} failed: ${message}. There is nowhere further to escalate this to — handle it yourself.`;
             }

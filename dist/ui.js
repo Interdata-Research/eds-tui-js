@@ -174,6 +174,9 @@ export function printBudgetSpent() {
     console.log(chalk.dim.yellow("  Tool-call budget spent — answering from what was found."));
     console.log();
 }
+export function printRetrying(attempt, retries, reason) {
+    console.log(chalk.yellow(`  Model request failed (${reason}) — retrying (${attempt}/${retries}), possibly on another node...`));
+}
 export function printCouldNotProduceFinalAnswer(message) {
     console.log(chalk.red(`  Could not produce a final answer: ${message}`));
     console.log();

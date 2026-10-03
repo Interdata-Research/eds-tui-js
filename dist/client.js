@@ -37,6 +37,27 @@ export function desiredModels(env) {
 // LAN relay call, never for the actual interdata credential.
 const insecureAgent = new Agent({ connect: { rejectUnauthorized: false } });
 const insecureFetch = ((input, init) => undiciFetch(input, { ...init, dispatcher: insecureAgent }));
+/**
+ * Rewrite a non-JSON error reply (an nginx "502 Bad Gateway" HTML page) as
+ * the JSON error ollama-js expects. Otherwise ollama-js console.logs
+ * "Getting text from response" into the UI and puts the whole HTML document
+ * in the error message.
+ */
+export function jsonErrors(inner) {
+    return (async (input, init) => {
+        const res = await inner(input, init);
+        if (res.ok || res.headers.get("content-type")?.includes("application/json"))
+            return res;
+        const body = await res.text().catch(() => "");
+        const title = /<title>([^<]*)<\/title>/i.exec(body)?.[1]?.trim();
+        const error = title ? `HTTP ${title}` : body.replace(/\s+/g, " ").trim().slice(0, 300) || `HTTP ${res.status} ${res.statusText}`;
+        return new Response(JSON.stringify({ error }), {
+            status: res.status,
+            statusText: res.statusText,
+            headers: { "content-type": "application/json" },
+        });
+    });
+}
 function stripTrailingSlashes(url) {
     return url.replace(/\/+$/, "");
 }
@@ -76,7 +97,7 @@ async function resolveViaMiniclosedai(desiredMain, desiredSmall, env) {
     // passes an AbortSignal itself, which already matches Python's explicit
     // `timeout=None` (wait indefinitely for a long generation). Nothing to
     // configure here for parity.
-    const client = new Ollama({ host: `${base}/relay/`, headers, fetch: insecureFetch });
+    const client = new Ollama({ host: `${base}/relay/`, headers, fetch: jsonErrors(insecureFetch) });
     return { client, mainModel: main, smallModel: small };
 }
 // Precedence, most explicit first: EDS_TUI_URL/EDS_TUI_TOKEN env vars (an
@@ -104,7 +125,7 @@ export function fallbackClient(desiredMain, desiredSmall, env, credentialsPath) 
         token = saved?.token ?? "";
     }
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    const client = new Ollama({ host, headers });
+    const client = new Ollama({ host, headers, fetch: jsonErrors(fetch) });
     return { client, mainModel: desiredMain, smallModel: desiredSmall };
 }
 export async function makeClient(desiredMain = DEFAULT_MAIN_MODEL, desiredSmall = desiredMain, env = process.env) {

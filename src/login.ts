@@ -9,6 +9,7 @@
 // with a clear message.
 
 import { Ollama } from "ollama";
+import { describeError } from "./retry.js";
 import chalk from "chalk";
 import { promptLine } from "./input.js";
 import { saveCredentials, loadCredentials, clearCredentials, CREDENTIALS_FILE } from "./credentials.js";
@@ -42,7 +43,7 @@ export async function validateToken(hubUrl: string, token: string): Promise<Vali
         detail: `token accepted, but the relay returned HTTP ${status} right now (no backend available?)`,
       };
     }
-    return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+    return { ok: false, detail: describeError(e) };
   }
 }
 

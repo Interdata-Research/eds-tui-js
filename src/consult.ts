@@ -15,6 +15,7 @@
 // from the pool via pickSpecialistModel, not a fixed smallModel.
 
 import type { Ollama, Message } from "ollama";
+import { describeError } from "./retry.js";
 import { runCommand } from "./exec.js";
 import { SHELL_TOOLS } from "./tools.js";
 import { FINAL_ANSWER_NUDGE, type ConsultSpecialistFn } from "./agent.js";
@@ -82,7 +83,7 @@ export function makeConsultSpecialist(
           client.chat({ model: specialist, messages, tools: SHELL_TOOLS })
         );
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
+        const message = describeError(e);
         ui.printConsultFailure(message);
         return `Consult with ${specialist} failed: ${message}. There is nowhere further to escalate this to — handle it yourself.`;
       }

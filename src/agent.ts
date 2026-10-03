@@ -18,6 +18,7 @@
 //      behavior; conflating them would be a real, subtle bug.
 
 import type { Ollama, Message, Tool } from "ollama";
+import { describeError } from "./retry.js";
 import * as skills from "./skills.js";
 import { runCommandOnce } from "./exec.js";
 import {
@@ -109,7 +110,7 @@ function createSkill(args: Record<string, any>): string {
       overwrite: asBool(args.overwrite ?? false),
     });
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
+    const message = describeError(e);
     ui.printCreateSkillError(message);
     return `create_skill failed: ${message}`;
   }
@@ -229,7 +230,7 @@ export async function finalAnswer(
       })
     );
   } catch (e) {
-    ui.printCouldNotProduceFinalAnswer(e instanceof Error ? e.message : String(e));
+    ui.printCouldNotProduceFinalAnswer(describeError(e));
     deps.saveHistory(messages);
     return null;
   }
@@ -358,7 +359,7 @@ export async function agenticLoop(
         })
       );
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = describeError(e);
       if (activeModel === deps.smallModel && deps.smallModel !== deps.mainModel) {
         ui.printEscalatingOnFailure(deps.smallModel, deps.mainModel, message);
         activeModel = deps.mainModel;
