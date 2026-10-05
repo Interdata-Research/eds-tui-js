@@ -211,7 +211,7 @@ async function main(): Promise<void> {
   const { main, small } = desiredModels(process.env);
   const { client, mainModel, smallModel } = await makeClient(main, small, process.env);
   withRetries(client, { onRetry: ui.printRetrying });
-  withDirectNodes(client, loadDirectNodes(process.env), { onStateChange: ui.printDirectNodeState });
+  withDirectNodes(client, loadDirectNodes(process.env));
 
   ui.printHeader(process.cwd());
 
