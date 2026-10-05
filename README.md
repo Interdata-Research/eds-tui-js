@@ -96,6 +96,30 @@ export EDS_TUI_MINICLOSEDAI_URL="https://127.0.0.1:8095"   # optional, default s
 export EDS_TUI_MINICLOSEDAI_TOKEN=""                       # optional, only if miniclosedai's API auth is enabled
 ```
 
+### Direct nodes (skip the hub when a known node is healthy)
+
+The hub picks a node per request and can't be told to avoid one, so a node
+that answers the hub's health check but can't actually generate costs every
+other request a long wait. You can list nodes for `ask` to call directly:
+
+```bash
+export EDS_TUI_DIRECT_NODES="https://xxxx-11434.proxy.runpod.net"   # comma-separated
+# or ~/.eds_tui/nodes.json:  {"nodes": ["https://xxxx-11434.proxy.runpod.net"]}
+```
+
+Before sending a request to a direct node, `ask` asks it for a one-token
+reply twice, 3s deadline each (its model list answering is not enough — a
+wedged node still answers that instantly). If both checks pass, the request
+goes straight to that node; if a check fails, or the direct request does,
+the request goes through the hub to another node serving the model. A
+passed check is trusted for 20s, a failed node is skipped for 60s before
+it's checked again.
+
+Independently of direct nodes, a reply that sends nothing for too long is
+abandoned and retried (so the hub moves on to another node): 20s for a
+small request, more for a long conversation (+1s per 2,000 characters, at
+most 90s), and longer on each retry.
+
 ## Usage
 
 ```bash

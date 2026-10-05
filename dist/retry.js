@@ -24,6 +24,16 @@
 // triage, compaction, final answer) gets it without threading options
 // through.
 const DEFAULT_DELAYS_MS = [2_000, 5_000, 10_000];
+/**
+ * How long a healthy node may take to send the first part of a reply: it has
+ * to read the whole prompt first, so the deadline grows with the prompt's
+ * size — 20s for a small request (routing answers in ~1s), +1s per 2,000
+ * characters of conversation, capped at 90s.
+ */
+export function firstPartDeadlineMs(request) {
+    const chars = JSON.stringify(request?.messages ?? []).length + JSON.stringify(request?.tools ?? []).length;
+    return Math.min(90_000, 20_000 + Math.round(chars / 2));
+}
 const TRANSIENT_STATUS = new Set([408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524]);
 const TRANSIENT_CODES = new Set([
     "ECONNRESET",
@@ -136,15 +146,33 @@ export function normalizeToolCalls(calls) {
     });
 }
 /** Send a chat request streaming and reassemble the parts into the response non-streaming would have returned. */
-async function chatViaStream(chat, request) {
+async function chatViaStream(chat, request, firstPartTimeoutMs) {
     // Errors here are about the request itself (HTTP status, connection refused) and propagate as-is.
     const stream = await chat({ ...request, stream: true });
+    const parts = stream[Symbol.asyncIterator]();
     let content = "";
     let thinking = "";
     const toolCalls = [];
     let last;
     try {
-        for await (const part of stream) {
+        let timer;
+        const silent = new Promise((_, reject) => {
+            timer = setTimeout(() => {
+                stream.abort?.();
+                reject(new Error(`no reply from the model server within ${Math.round(firstPartTimeoutMs / 1000)}s`));
+            }, firstPartTimeoutMs);
+        });
+        let next;
+        const first = parts.next();
+        first.catch(() => { }); // after a timeout it rejects (aborted) with no one awaiting it
+        try {
+            next = await Promise.race([first, silent]);
+        }
+        finally {
+            clearTimeout(timer);
+        }
+        for (; !next.done; next = await parts.next()) {
+            const part = next.value;
             content += part.message?.content ?? "";
             thinking += part.message?.thinking ?? "";
             if (part.message?.tool_calls)
@@ -176,6 +204,8 @@ async function chatViaStream(chat, request) {
 export function withRetries(client, opts = {}) {
     const delays = opts.delaysMs ?? DEFAULT_DELAYS_MS;
     const sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    const timeoutOpt = opts.firstPartTimeoutMs ?? firstPartDeadlineMs;
+    const firstPartTimeoutMs = (request) => (typeof timeoutOpt === "function" ? timeoutOpt(request) : timeoutOpt);
     const chat = client.chat.bind(client);
     client.chat = async (request) => {
         if (request?.stream)
@@ -183,19 +213,24 @@ export function withRetries(client, opts = {}) {
         let streamed = true;
         for (let attempt = 0;; attempt++) {
             try {
+                // Each retry waits longer: a wedged node is still dropped quickly, but
+                // a busy-yet-healthy one isn't cut off on every attempt.
                 if (streamed)
-                    return await chatViaStream(chat, request);
+                    return await chatViaStream(chat, request, firstPartTimeoutMs(request) * (attempt + 1));
                 const res = await chat(request);
                 return { ...res, message: { ...res.message, tool_calls: res.message?.tool_calls && normalizeToolCalls(res.message.tool_calls) } };
             }
             catch (e) {
                 if (attempt >= delays.length || !isTransient(e))
                     throw e;
+                const malformed = e instanceof StreamInterruptedError && e.malformed;
+                if (!malformed && opts.retryTransient === false)
+                    throw e;
                 opts.onRetry?.(attempt + 1, delays.length, describeError(e));
                 // A malformed tool call isn't a sick node, just one whose streaming
                 // tool-call output is broken (its non-streaming output is fine): ask
                 // again right away, non-streaming. Everything else waits a bit first.
-                if (e instanceof StreamInterruptedError && e.malformed)
+                if (malformed)
                     streamed = false;
                 else
                     await sleep(delays[attempt]);

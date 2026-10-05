@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isTransient, describeError, withRetries, normalizeToolCalls } from "./retry.js";
+import { isTransient, describeError, withRetries, normalizeToolCalls, firstPartDeadlineMs } from "./retry.js";
 
 // ollama-js throws this shape for a non-2xx reply but doesn't export the class.
 class ResponseError extends Error {
@@ -163,4 +163,43 @@ test("withRetries: a tool call missing its name (one node's broken streaming) is
   assert.equal(slept, 0, "a malformed reply is re-asked right away, non-streaming");
   assert.equal(res.message.tool_calls[0].function.arguments.command, "uname -s");
   assert.match(retries[0]!, /malformed tool call/);
+});
+
+test("withRetries: a stream that sends nothing before the deadline is aborted and retried", async () => {
+  let calls = 0;
+  let aborted = 0;
+  const client: any = {
+    chat: async () => {
+      calls++;
+      if (calls === 1) {
+        let wake: (v: unknown) => void = () => {};
+        const it: any = (async function* () {
+          await new Promise((r) => (wake = r)); // a wedged node: nothing, until aborted
+          throw new Error("aborted");
+        })();
+        it.abort = () => {
+          aborted++;
+          wake(null);
+        };
+        return it;
+      }
+      return (async function* () {
+        yield { done: true, message: { role: "assistant", content: "ok" } };
+      })();
+    },
+  };
+  const retries: string[] = [];
+  withRetries(client, { delaysMs: [0], sleep: async () => {}, firstPartTimeoutMs: 20, onRetry: (_a, _n, why) => retries.push(why) });
+  // (the retry's own deadline is 40ms: each attempt waits longer than the last)
+  const res = await client.chat({ model: "m", messages: [] });
+  assert.equal(res.message.content, "ok");
+  assert.equal(aborted, 1);
+  assert.match(retries[0]!, /no reply from the model server within/);
+});
+
+test("firstPartDeadlineMs: short for small requests, longer for big conversations, capped", () => {
+  assert.equal(firstPartDeadlineMs({ messages: [{ role: "user", content: "hi" }] }) < 21_000, true);
+  const big = { messages: [{ role: "user", content: "x".repeat(60_000) }] };
+  assert.equal(Math.round(firstPartDeadlineMs(big) / 1000), 50);
+  assert.equal(firstPartDeadlineMs({ messages: [{ role: "user", content: "x".repeat(1_000_000) }] }), 90_000);
 });

@@ -28,7 +28,8 @@ import { makeConsultSpecialist } from "./consult.js";
 import { clipOutput, MAX_OUTPUT_CHARS } from "./clip.js";
 import { runCommandOnce } from "./exec.js";
 import * as skills from "./skills.js";
-import { displayModel, printRetrying } from "./ui.js";
+import { displayModel, printRetrying, printDirectNodeState } from "./ui.js";
+import { withDirectNodes, loadDirectNodes } from "./nodes.js";
 import { withRetries } from "./retry.js";
 const SIMPLE_PROBE = "how many .py files are in this directory";
 const COMPLEX_PROBE = "refactor the agentic loop into its own module and explain the tradeoffs of each approach";
@@ -90,6 +91,7 @@ export async function selfCheck() {
     const { main, small } = desiredModels(process.env);
     const { client, mainModel, smallModel } = await makeClient(main, small, process.env);
     withRetries(client, { onRetry: printRetrying });
+    withDirectNodes(client, loadDirectNodes(process.env), { onStateChange: printDirectNodeState });
     const startedAll = Date.now();
     const results = [];
     console.log();

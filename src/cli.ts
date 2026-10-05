@@ -16,6 +16,7 @@ import { makeClient, desiredModels } from "./client.js";
 import { triage } from "./triage.js";
 import { resolveModel, pinFor } from "./resolve-model.js";
 import { withRetries } from "./retry.js";
+import { withDirectNodes, loadDirectNodes } from "./nodes.js";
 import { buildSystemPrompt } from "./prompt-builder.js";
 import { agenticLoop, HARD_MAX_TURNS } from "./agent.js";
 import { makeDelegateTask } from "./subagent.js";
@@ -210,6 +211,7 @@ async function main(): Promise<void> {
   const { main, small } = desiredModels(process.env);
   const { client, mainModel, smallModel } = await makeClient(main, small, process.env);
   withRetries(client, { onRetry: ui.printRetrying });
+  withDirectNodes(client, loadDirectNodes(process.env), { onStateChange: ui.printDirectNodeState });
 
   ui.printHeader(process.cwd());
 

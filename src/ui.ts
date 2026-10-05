@@ -201,6 +201,12 @@ export function printRetrying(attempt: number, retries: number, reason: string):
   console.log(chalk.yellow(`  Model request failed (${reason}) — retrying (${attempt}/${retries}), possibly on another node...`));
 }
 
+export function printDirectNodeState(url: string, usable: boolean, detail: string): void {
+  const host = url.replace(/^https?:\/\//, "");
+  if (usable) console.log(chalk.dim(`  Using direct node ${host} (${detail})`));
+  else console.log(chalk.yellow(`  Skipping direct node ${host} (${detail}) — using another qwen3.8 via the interdata hub`));
+}
+
 export function printCouldNotProduceFinalAnswer(message: string): void {
   console.log(chalk.red(`  Could not produce a final answer: ${message}`));
   console.log();
