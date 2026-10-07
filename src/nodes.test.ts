@@ -24,14 +24,31 @@ test("loadNodeConfig: env wins per list, is comma-separated, trims trailing slas
     const cfg = loadNodeConfig({ EDS_TUI_DIRECT_NODES: ` ${NODE}/ , junk, http://lan:11434` }, path);
     assert.deepEqual(cfg.direct, [NODE, "http://lan:11434"]);
     assert.deepEqual(cfg.lastResort, [LAST], "the other list still comes from the file");
-    assert.deepEqual(loadNodeConfig({ EDS_TUI_DIRECT_NODES: "", EDS_TUI_LAST_RESORT_NODES: "" }, path), { direct: [], lastResort: [] }, "empty env vars turn the lists off");
+    assert.deepEqual(loadNodeConfig({ EDS_TUI_DIRECT_NODES: "", EDS_TUI_LAST_RESORT_NODES: "" }, path), { direct: [], lastResort: [], tokens: {} }, "empty env vars turn the lists off");
   });
 });
 
 test("loadNodeConfig: falls back to the file, and to none when it is missing or bad", () => {
-  withTempFile(JSON.stringify({ nodes: [`${NODE}/`] }), (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [NODE], lastResort: [] }));
-  withTempFile(null, (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [], lastResort: [] }));
-  withTempFile("{not json", (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [], lastResort: [] }));
+  withTempFile(JSON.stringify({ nodes: [`${NODE}/`] }), (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [NODE], lastResort: [], tokens: {} }));
+  withTempFile(null, (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [], lastResort: [], tokens: {} }));
+  withTempFile("{not json", (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [], lastResort: [], tokens: {} }));
+});
+
+test("loadNodeConfig: an entry can be {url, token} (a node behind an authenticating proxy, possibly under a path)", () => {
+  const proxied = "http://98.116.214.11:11434/nvidia1";
+  withTempFile(JSON.stringify({ lastResort: [{ url: `${proxied}/`, token: " s3cret " }, LAST, { url: "not-a-url", token: "x" }] }), (path) => {
+    assert.deepEqual(loadNodeConfig({}, path), { direct: [], lastResort: [proxied, LAST], tokens: { [proxied]: "s3cret" } });
+  });
+});
+
+test("probeNode: sends the node's token as a Bearer header", async () => {
+  let auth: string | null = null;
+  const fetchFn = (async (_url: string, init: RequestInit) => {
+    auth = new Headers(init.headers).get("authorization");
+    return new Response(JSON.stringify({ done: true }), { status: 200 });
+  }) as unknown as typeof fetch;
+  await probeNode(NODE, "qwen3.8:latest", { fetchFn, attempts: 1, token: "s3cret" });
+  assert.equal(auth, "Bearer s3cret");
 });
 
 function fakeFetch(replies: Array<"ok" | "hang" | number>) {
