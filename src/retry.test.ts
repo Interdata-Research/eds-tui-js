@@ -40,6 +40,12 @@ test("describeError: an nginx HTML page becomes its one-line title", () => {
   assert.equal(describeError(new ResponseError(NGINX_502, 502)), "HTTP 502 Bad Gateway");
 });
 
+test("describeError: an error already labelled with its status isn't labelled twice", () => {
+  assert.equal(describeError(new ResponseError("HTTP 502 Bad Gateway", 502)), "HTTP 502 Bad Gateway");
+  assert.equal(describeError(new ResponseError("Error 503: Service Unavailable", 503)), "Error 503: Service Unavailable");
+  assert.equal(describeError(new ResponseError("model is loading", 503)), "HTTP 503: model is loading");
+});
+
 test("describeError: 'fetch failed' shows the underlying cause", () => {
   assert.equal(describeError(fetchFailed("UND_ERR_SOCKET")), "UND_ERR_SOCKET: other side closed");
 });

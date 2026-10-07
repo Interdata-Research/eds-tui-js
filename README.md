@@ -96,24 +96,35 @@ export EDS_TUI_MINICLOSEDAI_URL="https://127.0.0.1:8095"   # optional, default s
 export EDS_TUI_MINICLOSEDAI_TOKEN=""                       # optional, only if miniclosedai's API auth is enabled
 ```
 
-### Direct nodes (skip the hub when a known node is healthy)
+### Direct and last-resort nodes
 
 The hub picks a node per request and can't be told to avoid one, so a node
 that answers the hub's health check but can't actually generate costs every
-other request a long wait. You can list nodes for `ask` to call directly:
+other request a long wait. You can list nodes for `ask` to call directly,
+and nodes to fall back to when the hub can't serve a request:
 
 ```bash
 export EDS_TUI_DIRECT_NODES="https://xxxx-11434.proxy.runpod.net"   # comma-separated
-# or ~/.eds_tui/nodes.json:  {"nodes": ["https://xxxx-11434.proxy.runpod.net"]}
+export EDS_TUI_LAST_RESORT_NODES="http://100.98.75.95:11434"         # comma-separated
+# or ~/.eds_tui/nodes.json:
+#   {"nodes": ["https://xxxx-11434.proxy.runpod.net"],
+#    "lastResort": ["http://100.98.75.95:11434"]}
 ```
 
-Before sending a request to a direct node, `ask` asks it for a one-token
-reply twice, 3s deadline each (its model list answering is not enough — a
-wedged node still answers that instantly). If both checks pass, the request
-goes straight to that node; if a check fails, or the direct request does,
-the request goes through the hub to another node serving the model. A
-passed check is trusted for 20s, a failed node is skipped for 60s before
-it's checked again.
+Each request goes, in order, to:
+
+1. a **direct node** that passes its quick checks;
+2. the **hub**, one attempt;
+3. if that attempt fails or sends nothing in time (every node behind the
+   hub busy or not responding), a **last-resort node** that passes its
+   quick checks;
+4. the hub again, with its full retries.
+
+A quick check is a one-token reply, asked for twice with a 3s deadline each
+(a node's model list answering is not enough — a wedged node still answers
+that instantly). A passed check is trusted for 20s; a node that fails one,
+or fails a request, is skipped for 60s before it's checked again. While the
+hub is answering, last-resort nodes aren't contacted at all.
 
 Independently of direct nodes, a reply that sends nothing for too long is
 abandoned and retried (so the hub moves on to another node): 20s for a

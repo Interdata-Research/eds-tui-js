@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadDirectNodes, probeNode, withDirectNodes } from "./nodes.js";
-import { withRetries } from "./retry.js";
+import { loadNodeConfig, probeNode, withNodeRouting } from "./nodes.js";
 
 const NODE = "https://pod-11434.proxy.runpod.net";
+const LAST = "http://100.98.75.95:11434";
 
 function withTempFile(contents: string | null, fn: (path: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), "eds-tui-nodes-test-"));
@@ -19,17 +19,19 @@ function withTempFile(contents: string | null, fn: (path: string) => void): void
   }
 }
 
-test("loadDirectNodes: env wins, is comma-separated, trims trailing slashes, drops non-URLs", () => {
-  withTempFile(JSON.stringify({ nodes: ["https://from-file"] }), (path) => {
-    assert.deepEqual(loadDirectNodes({ EDS_TUI_DIRECT_NODES: ` ${NODE}/ , junk, http://lan:11434` }, path), [NODE, "http://lan:11434"]);
-    assert.deepEqual(loadDirectNodes({ EDS_TUI_DIRECT_NODES: "" }, path), [], "an empty env var turns direct nodes off");
+test("loadNodeConfig: env wins per list, is comma-separated, trims trailing slashes, drops non-URLs", () => {
+  withTempFile(JSON.stringify({ nodes: ["https://from-file"], lastResort: [`${LAST}/`] }), (path) => {
+    const cfg = loadNodeConfig({ EDS_TUI_DIRECT_NODES: ` ${NODE}/ , junk, http://lan:11434` }, path);
+    assert.deepEqual(cfg.direct, [NODE, "http://lan:11434"]);
+    assert.deepEqual(cfg.lastResort, [LAST], "the other list still comes from the file");
+    assert.deepEqual(loadNodeConfig({ EDS_TUI_DIRECT_NODES: "", EDS_TUI_LAST_RESORT_NODES: "" }, path), { direct: [], lastResort: [] }, "empty env vars turn the lists off");
   });
 });
 
-test("loadDirectNodes: falls back to the file, and to none when it is missing or bad", () => {
-  withTempFile(JSON.stringify({ nodes: [`${NODE}/`] }), (path) => assert.deepEqual(loadDirectNodes({}, path), [NODE]));
-  withTempFile(null, (path) => assert.deepEqual(loadDirectNodes({}, path), []));
-  withTempFile("{not json", (path) => assert.deepEqual(loadDirectNodes({}, path), []));
+test("loadNodeConfig: falls back to the file, and to none when it is missing or bad", () => {
+  withTempFile(JSON.stringify({ nodes: [`${NODE}/`] }), (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [NODE], lastResort: [] }));
+  withTempFile(null, (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [], lastResort: [] }));
+  withTempFile("{not json", (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [], lastResort: [] }));
 });
 
 function fakeFetch(replies: Array<"ok" | "hang" | number>) {
@@ -62,12 +64,13 @@ test("probeNode: healthy only if every quick check returns a reply in time", asy
   assert.deepEqual(await probeNode(NODE, "qwen3.8:latest", { fetchFn: flaky.fn, attempts: 2 }), { ok: false, detail: "check 2: HTTP 524" });
 });
 
-/** A client whose chat() streams one reply tagged with where it came from. */
-function fakeClient(from: string, fail?: Error) {
+/** A client whose chat() streams one reply tagged with where it came from; `fails` = errors thrown by the first calls. */
+function fakeClient(from: string, fails: Error[] = [], alwaysFail = false) {
   const seen: any[] = [];
   const client: any = {
     chat: async (req: any) => {
       seen.push(req);
+      const fail = alwaysFail ? fails[0] : fails[seen.length - 1];
       if (fail) throw fail;
       return (async function* () {
         yield { done: true, message: { role: "assistant", content: `from ${from}` } };
@@ -77,57 +80,112 @@ function fakeClient(from: string, fail?: Error) {
   return { client, seen };
 }
 
-function setup(probeResults: boolean[], directFail?: Error) {
-  const hub = fakeClient("hub");
-  const direct = fakeClient("direct", directFail);
-  let probes = 0;
-  let t = 0;
-  const changes: string[] = [];
-  withRetries(hub.client, { delaysMs: [] });
-  withDirectNodes(hub.client, [NODE], {
-    probe: async () => {
-      const ok = probeResults[Math.min(probes++, probeResults.length - 1)]!;
-      return { ok, detail: ok ? "2 quick checks passed" : "check 1: no reply within 3s" };
-    },
-    makeClient: () => direct.client,
-    onStateChange: (_u, usable) => changes.push(usable ? "usable" : "skipped"),
-    now: () => t,
-  });
-  return { hub, direct, probes: () => probes, changes, advance: (ms: number) => (t += ms) };
+const RESET = Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }) });
+const GATEWAY = Object.assign(new Error("HTTP 502 Bad Gateway"), { status_code: 502 });
+
+interface SetupOptions {
+  direct?: boolean[]; // probe results for the direct node; omitted = no direct node
+  last?: boolean[]; // probe results for the last-resort node; omitted = no last-resort node
+  hubFails?: Error[];
+  directFail?: Error;
+  lastFail?: Error;
 }
 
-test("withDirectNodes: a node that passes its quick checks gets the request", async () => {
-  const s = setup([true]);
-  const res = await s.hub.client.chat({ model: "qwen3.8:latest", messages: [] });
-  assert.equal(res.message.content, "from direct");
+function setup(o: SetupOptions) {
+  const hub = fakeClient("hub", o.hubFails);
+  const direct = fakeClient("direct", o.directFail ? [o.directFail] : [], true);
+  const last = fakeClient("last resort", o.lastFail ? [o.lastFail] : [], true);
+  const probes: string[] = [];
+  const counts = new Map<string, number>();
+  let t = 0;
+  const changes: string[] = [];
+  const retries: string[] = [];
+  withNodeRouting(
+    hub.client,
+    { direct: o.direct ? [NODE] : [], lastResort: o.last ? [LAST] : [] },
+    {
+      probe: async (url) => {
+        probes.push(url);
+        const results = url === NODE ? o.direct! : o.last!;
+        const n = counts.get(url) ?? 0;
+        counts.set(url, n + 1);
+        const ok = results[Math.min(n, results.length - 1)]!;
+        return { ok, detail: ok ? "2 quick checks passed" : "check 1: no reply within 3s" };
+      },
+      makeClient: (url) => (url === NODE ? direct.client : last.client),
+      onStateChange: (url, usable) => changes.push(`${url === NODE ? "direct" : "last"} ${usable ? "usable" : "skipped"}`),
+      now: () => t,
+      retry: { delaysMs: [0, 0], sleep: async () => {}, onRetry: (_a, _n, why) => retries.push(why) },
+    }
+  );
+  return { hub, direct, last, probes, changes, retries, advance: (ms: number) => (t += ms) };
+}
+
+const ask = (s: ReturnType<typeof setup>) => s.hub.client.chat({ model: "qwen3.8:latest", messages: [] });
+
+test("routing: a direct node that passes its quick checks gets the request", async () => {
+  const s = setup({ direct: [true] });
+  assert.equal((await ask(s)).message.content, "from direct");
   assert.equal(s.hub.seen.length, 0);
-  assert.deepEqual(s.changes, ["usable"]);
+  assert.deepEqual(s.changes, ["direct usable"]);
 });
 
-test("withDirectNodes: a node that fails its checks is skipped for the hub, and not re-checked until the cache expires", async () => {
-  const s = setup([false]);
-  assert.equal((await s.hub.client.chat({ model: "qwen3.8:latest", messages: [] })).message.content, "from hub");
-  assert.equal((await s.hub.client.chat({ model: "qwen3.8:latest", messages: [] })).message.content, "from hub");
-  assert.equal(s.probes(), 1, "a failed node is not re-probed on every request");
+test("routing: a direct node that fails its checks is skipped for the hub, and not re-checked until the cache expires", async () => {
+  const s = setup({ direct: [false] });
+  assert.equal((await ask(s)).message.content, "from hub");
+  assert.equal((await ask(s)).message.content, "from hub");
+  assert.equal(s.probes.length, 1, "a failed node is not re-probed on every request");
   assert.equal(s.direct.seen.length, 0);
   s.advance(61_000);
-  await s.hub.client.chat({ model: "qwen3.8:latest", messages: [] });
-  assert.equal(s.probes(), 2, "re-checked once the failure cache expires");
+  await ask(s);
+  assert.equal(s.probes.length, 2, "re-checked once the failure cache expires");
 });
 
-test("withDirectNodes: a direct request that fails falls back to the hub and marks the node skipped", async () => {
-  const s = setup([true], Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }) }));
-  const res = await s.hub.client.chat({ model: "qwen3.8:latest", messages: [] });
-  assert.equal(res.message.content, "from hub");
+test("routing: a direct request that fails falls back to the hub and marks the node skipped", async () => {
+  const s = setup({ direct: [true], directFail: RESET });
+  assert.equal((await ask(s)).message.content, "from hub");
   assert.equal(s.direct.seen.length, 1, "no same-node retry: straight to the hub");
-  assert.deepEqual(s.changes, ["usable", "skipped"]);
-  await s.hub.client.chat({ model: "qwen3.8:latest", messages: [] });
+  assert.deepEqual(s.changes, ["direct usable", "direct skipped"]);
+  await ask(s);
   assert.equal(s.direct.seen.length, 1, "the failed node is skipped next time too");
 });
 
-test("withDirectNodes: no configured nodes leaves the client untouched", () => {
-  const hub = fakeClient("hub");
-  const chat = hub.client.chat;
-  withDirectNodes(hub.client, []);
-  assert.equal(hub.client.chat, chat);
+test("routing: the last resort is left alone while the hub answers — not even checked", async () => {
+  const s = setup({ last: [true] });
+  assert.equal((await ask(s)).message.content, "from hub");
+  assert.deepEqual(s.probes, []);
+  assert.equal(s.last.seen.length, 0);
+});
+
+test("routing: when the hub's first attempt fails, the last resort (after its checks) answers", async () => {
+  const s = setup({ last: [true], hubFails: [GATEWAY] });
+  assert.equal((await ask(s)).message.content, "from last resort");
+  assert.equal(s.hub.seen.length, 1, "only one hub attempt before the last resort");
+  assert.deepEqual(s.probes, [LAST]);
+  assert.deepEqual(s.retries, ["HTTP 502 Bad Gateway"]);
+});
+
+test("routing: a hub refusal that isn't retryable (no node available) also goes to the last resort", async () => {
+  const noBackend = Object.assign(new Error("Model 'qwen3.8:latest' is not available through this relay"), { status_code: 403 });
+  const s = setup({ last: [true], hubFails: [noBackend] });
+  assert.equal((await ask(s)).message.content, "from last resort");
+});
+
+test("routing: a last resort that fails its checks leaves the request to the hub's retries", async () => {
+  const s = setup({ last: [false], hubFails: [GATEWAY] });
+  assert.equal((await ask(s)).message.content, "from hub");
+  assert.equal(s.last.seen.length, 0);
+  assert.equal(s.hub.seen.length, 2, "first attempt, then the retrying hub");
+});
+
+test("routing: order is direct, hub, last resort, hub", async () => {
+  const s = setup({ direct: [false], last: [true], hubFails: [GATEWAY] });
+  assert.equal((await ask(s)).message.content, "from last resort");
+  assert.deepEqual(s.probes, [NODE, LAST]);
+});
+
+test("routing: no nodes configured still gets the hub's retries", async () => {
+  const s = setup({ hubFails: [GATEWAY] });
+  assert.equal((await ask(s)).message.content, "from hub");
+  assert.equal(s.hub.seen.length, 2);
 });

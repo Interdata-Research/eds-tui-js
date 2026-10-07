@@ -12,8 +12,7 @@ import chalk from "chalk";
 import { makeClient, desiredModels } from "./client.js";
 import { triage } from "./triage.js";
 import { resolveModel, pinFor } from "./resolve-model.js";
-import { withRetries } from "./retry.js";
-import { withDirectNodes, loadDirectNodes } from "./nodes.js";
+import { withNodeRouting, loadNodeConfig } from "./nodes.js";
 import { buildSystemPrompt } from "./prompt-builder.js";
 import { agenticLoop, HARD_MAX_TURNS } from "./agent.js";
 import { makeDelegateTask } from "./subagent.js";
@@ -186,8 +185,7 @@ async function main() {
     // EDS_TUI_MODEL / EDS_TUI_SMALL_MODEL if set, package defaults otherwise.
     const { main, small } = desiredModels(process.env);
     const { client, mainModel, smallModel } = await makeClient(main, small, process.env);
-    withRetries(client, { onRetry: ui.printRetrying });
-    withDirectNodes(client, loadDirectNodes(process.env));
+    withNodeRouting(client, loadNodeConfig(process.env), { retry: { onRetry: ui.printRetrying } });
     ui.printHeader(process.cwd());
     const cwdShort = basename(process.cwd()) || process.cwd();
     let prior;

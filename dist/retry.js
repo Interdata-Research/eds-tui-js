@@ -97,7 +97,8 @@ export function describeError(e) {
         if (html)
             return `HTTP ${html[1].trim()}`;
         const oneLine = e.message.replace(/\s+/g, " ").trim();
-        return oneLine.startsWith("Error ") || oneLine.startsWith(String(status)) ? oneLine : `HTTP ${status}: ${oneLine}`;
+        // Already labelled: ollama-js's "Error 502: ..." or jsonErrors' "HTTP 502 Bad Gateway".
+        return /^(Error |HTTP |\d{3}\b)/.test(oneLine) ? oneLine : `HTTP ${status}: ${oneLine}`;
     }
     if (e instanceof StreamInterruptedError) {
         return `stream interrupted: ${e.cause instanceof Error ? describeError(e.cause) : e.message}`;

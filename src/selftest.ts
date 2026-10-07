@@ -32,8 +32,7 @@ import { clipOutput, MAX_OUTPUT_CHARS } from "./clip.js";
 import { runCommandOnce } from "./exec.js";
 import * as skills from "./skills.js";
 import { displayModel, printRetrying, printDirectNodeState } from "./ui.js";
-import { withDirectNodes, loadDirectNodes } from "./nodes.js";
-import { withRetries } from "./retry.js";
+import { withNodeRouting, loadNodeConfig } from "./nodes.js";
 
 const SIMPLE_PROBE = "how many .py files are in this directory";
 const COMPLEX_PROBE =
@@ -106,8 +105,7 @@ export async function selfCheck(): Promise<void> {
   // the two entry points can't disagree about which model was asked for.
   const { main, small } = desiredModels(process.env);
   const { client, mainModel, smallModel } = await makeClient(main, small, process.env);
-  withRetries(client, { onRetry: printRetrying });
-  withDirectNodes(client, loadDirectNodes(process.env), { onStateChange: printDirectNodeState });
+  withNodeRouting(client, loadNodeConfig(process.env), { retry: { onRetry: printRetrying }, onStateChange: printDirectNodeState });
   const startedAll = Date.now();
   const results: boolean[] = [];
 
