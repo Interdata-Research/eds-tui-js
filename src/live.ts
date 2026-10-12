@@ -69,8 +69,10 @@ export interface LiveHandlers {
   onExit(): void;
   /** ↑ on an empty line: the last queued message, taken back out of the queue to edit. */
   onPullBack(): string | undefined;
-  /** Ctrl-C on an empty line while idle: true if it dropped waiting messages (instead of offering to exit). */
+  /** Ctrl-C on an empty line while idle: true if it dropped waiting messages (instead of exiting). */
   onClearQueue(): boolean;
+  /** The input line changed (typed, deleted, cleared). */
+  onEdit?(): void;
 }
 
 export class LiveTerminal {
@@ -90,7 +92,6 @@ export class LiveTerminal {
   private queued: string[] = [];
   private note: string | null = null;
   private noteTimer: NodeJS.Timeout | undefined;
-  private lastInterrupt = 0;
   private onData = (chunk: Buffer) => this.handle(this.editor.feed(chunk.toString("utf8")));
 
   constructor(
@@ -252,14 +253,11 @@ export class LiveTerminal {
           if (this.busySince !== null) this.handlers.onStop();
           break;
         case "interrupt":
-          if (this.editor.buf) this.editor.clear();
-          else if (this.busySince !== null) this.handlers.onStop();
-          else if (this.handlers.onClearQueue()) break;
-          else if (Date.now() - this.lastInterrupt < 2000) this.handlers.onExit();
-          else {
-            this.lastInterrupt = Date.now();
-            this.flash("Press Ctrl-C again to exit (or Ctrl-D).");
-          }
+          if (this.editor.buf) {
+            this.editor.clear();
+            this.handlers.onEdit?.();
+          } else if (this.busySince !== null) this.handlers.onStop();
+          else if (!this.handlers.onClearQueue()) this.handlers.onExit();
           break;
         case "eof":
           this.handlers.onExit();
@@ -271,6 +269,7 @@ export class LiveTerminal {
         }
       }
     }
+    if (events.some((e) => e.type === "changed")) this.handlers.onEdit?.();
     this.redraw();
   }
 }

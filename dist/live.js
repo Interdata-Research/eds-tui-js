@@ -72,7 +72,6 @@ export class LiveTerminal {
     queued = [];
     note = null;
     noteTimer;
-    lastInterrupt = 0;
     onData = (chunk) => this.handle(this.editor.feed(chunk.toString("utf8")));
     constructor(promptText, handlers) {
         this.promptText = promptText;
@@ -232,18 +231,14 @@ export class LiveTerminal {
                         this.handlers.onStop();
                     break;
                 case "interrupt":
-                    if (this.editor.buf)
+                    if (this.editor.buf) {
                         this.editor.clear();
+                        this.handlers.onEdit?.();
+                    }
                     else if (this.busySince !== null)
                         this.handlers.onStop();
-                    else if (this.handlers.onClearQueue())
-                        break;
-                    else if (Date.now() - this.lastInterrupt < 2000)
+                    else if (!this.handlers.onClearQueue())
                         this.handlers.onExit();
-                    else {
-                        this.lastInterrupt = Date.now();
-                        this.flash("Press Ctrl-C again to exit (or Ctrl-D).");
-                    }
                     break;
                 case "eof":
                     this.handlers.onExit();
@@ -256,6 +251,8 @@ export class LiveTerminal {
                 }
             }
         }
+        if (events.some((e) => e.type === "changed"))
+            this.handlers.onEdit?.();
         this.redraw();
     }
 }

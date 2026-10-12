@@ -340,7 +340,7 @@ async function main() {
         await answer(parsed.request, parsed.skill);
         return;
     }
-    console.log(chalk.dim("  Keep typing while it works: Enter queues the next message · Esc stops · Ctrl-D exits\n"));
+    console.log(chalk.dim("  Keep typing while it works to queue more messages · Esc stops\n"));
     await runSession({
         promptText,
         run: async (text) => {

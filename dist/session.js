@@ -1,10 +1,12 @@
-// The interactive session: `ask` in a terminal stays open like Claude Code.
-// While a message is being worked on you can keep typing: Enter queues the
-// next message, Esc stops the current one, ↑ on an empty line takes the last
-// queued message back to edit. Queued messages run one after another in the
-// same conversation. After Esc with messages still queued, the queue waits:
-// Enter on an empty line runs them, Ctrl-C drops them, and a newly typed
-// message goes first. Ctrl-D, Ctrl-C twice, or /exit leave.
+// The interactive session: `ask` takes a message, works on it, and exits when
+// all the work is done, as it always did. While it's working you can keep
+// typing: Enter queues the next message, Esc stops the current one, ↑ on an
+// empty line takes the last queued message back to edit. Queued messages run
+// one after another in the same conversation, and it exits after the last.
+// It only stays open for work you asked for: after Esc with messages still
+// queued (Enter runs them, Ctrl-C drops them and leaves; a newly typed message
+// goes first), or a message you're halfway through typing when the work
+// finishes (Enter sends it; Ctrl-C or Ctrl-D leaves).
 //
 // The AI Command Center (and anything else driving `ask` one message at a
 // time) gets the one-shot behavior instead: see cli.ts's oneShot.
@@ -39,6 +41,7 @@ export async function runSession(o) {
     let controller = null;
     let paused = false;
     let exiting = false;
+    let started = false; // a message has run: from now on, nothing left to do means exit
     let wake = null;
     const poke = () => wake?.();
     const pausedNote = () => `Stopped · ${queue.length} queued: Enter runs ${queue.length > 1 ? "them" : "it"} · ↑ edits the last · Ctrl-C drops ${queue.length > 1 ? "them" : "it"}`;
@@ -53,8 +56,8 @@ export async function runSession(o) {
                 if (paused) {
                     paused = false;
                     live.flash("", 0);
-                    poke();
                 }
+                poke(); // after the work, an empty Enter means done
                 return;
             }
             if (paused) {
@@ -71,6 +74,10 @@ export async function runSession(o) {
             controller?.abort();
         },
         onExit: exit,
+        onEdit() {
+            if (!controller)
+                poke(); // a draft cleared after the work finished: nothing left, leave
+        },
         onPullBack() {
             const text = queue.pop();
             if (paused && queue.length === 0) {
@@ -88,7 +95,8 @@ export async function runSession(o) {
             queue.length = 0;
             paused = false;
             live.setQueue([]);
-            live.flash("Dropped the queued messages.");
+            live.flash("", 0);
+            exit(); // dropping what was left is the end of the work
             return true;
         },
     });
@@ -102,10 +110,17 @@ export async function runSession(o) {
     try {
         while (!exiting) {
             if (queue.length === 0 || paused) {
+                if (started && !paused) {
+                    if (!live.editor.buf.trim())
+                        break; // all done
+                    live.flash("Enter sends it · Ctrl-C to leave", 24 * 3600_000); // don't lose a half-typed message
+                }
                 await new Promise((resolve) => (wake = resolve));
                 wake = null;
                 continue;
             }
+            started = true;
+            live.flash("", 0);
             const text = queue.shift();
             live.setQueue(queue);
             live.print("\n" + o.promptText + text + "\n");
