@@ -150,13 +150,14 @@ export function parallelSlots(nodes, discovered = []) {
  */
 export function withNodeRouting(hub, nodes, opts = {}) {
     const rawHubChat = hub.chat.bind(hub);
-    const hubWithRetries = withRetries({ chat: rawHubChat }, opts.retry).chat;
+    const hubServer = hub.config?.host;
+    const hubWithRetries = withRetries({ chat: rawHubChat }, { ...opts.retry, server: hubServer }).chat;
     if (nodes.direct.length === 0 && nodes.lastResort.length === 0 && !opts.discovered) {
         hub.chat = hubWithRetries;
         return hub;
     }
     // One hub attempt (still re-asking a malformed reply), then on to the last resort.
-    const hubOnce = withRetries({ chat: rawHubChat }, { ...opts.retry, delaysMs: [0], retryTransient: false }).chat;
+    const hubOnce = withRetries({ chat: rawHubChat }, { ...opts.retry, delaysMs: [0], retryTransient: false, server: hubServer }).chat;
     const tokens = nodes.tokens ?? {};
     const slots = nodes.slots ?? {};
     const leases = opts.leases ?? fileLeases();
@@ -175,7 +176,7 @@ export function withNodeRouting(hub, nodes, opts = {}) {
     const clients = new Map();
     function clientFor(url) {
         if (!clients.has(url))
-            clients.set(url, withRetries(makeClient(url), { ...opts.retry, delaysMs: [0], retryTransient: false, onRetry: undefined }).chat);
+            clients.set(url, withRetries(makeClient(url), { ...opts.retry, delaysMs: [0], retryTransient: false, onRetry: undefined, server: url }).chat);
         return clients.get(url);
     }
     /** One request on a node, counted while it runs (from `release`, if the caller already took the slot). */

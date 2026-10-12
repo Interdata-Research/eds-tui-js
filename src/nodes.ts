@@ -196,13 +196,14 @@ type Chat = (req: any) => Promise<any>;
  */
 export function withNodeRouting(hub: Ollama, nodes: NodeConfig, opts: NodeRoutingOptions = {}): Ollama {
   const rawHubChat = hub.chat.bind(hub) as Chat;
-  const hubWithRetries = withRetries({ chat: rawHubChat } as unknown as Ollama, opts.retry).chat as Chat;
+  const hubServer: string | undefined = (hub as any).config?.host;
+  const hubWithRetries = withRetries({ chat: rawHubChat } as unknown as Ollama, { ...opts.retry, server: hubServer }).chat as Chat;
   if (nodes.direct.length === 0 && nodes.lastResort.length === 0 && !opts.discovered) {
     (hub as any).chat = hubWithRetries;
     return hub;
   }
   // One hub attempt (still re-asking a malformed reply), then on to the last resort.
-  const hubOnce = withRetries({ chat: rawHubChat } as unknown as Ollama, { ...opts.retry, delaysMs: [0], retryTransient: false }).chat as Chat;
+  const hubOnce = withRetries({ chat: rawHubChat } as unknown as Ollama, { ...opts.retry, delaysMs: [0], retryTransient: false, server: hubServer }).chat as Chat;
 
   const tokens = nodes.tokens ?? {};
   const slots = nodes.slots ?? {};
@@ -225,7 +226,7 @@ export function withNodeRouting(hub: Ollama, nodes: NodeConfig, opts: NodeRoutin
   // same-node retries: any other failure moves on to the next route at once.
   const clients = new Map<string, Chat>();
   function clientFor(url: string): Chat {
-    if (!clients.has(url)) clients.set(url, withRetries(makeClient(url), { ...opts.retry, delaysMs: [0], retryTransient: false, onRetry: undefined }).chat as Chat);
+    if (!clients.has(url)) clients.set(url, withRetries(makeClient(url), { ...opts.retry, delaysMs: [0], retryTransient: false, onRetry: undefined, server: url }).chat as Chat);
     return clients.get(url)!;
   }
 

@@ -165,6 +165,13 @@ the hub, which spreads it over the rest of the network.
 }
 ```
 
+Some servers (RunPod's, and the hub when it routes to one) break streamed tool
+calls: only the last fragment arrives (`{"arguments": "}"}`). The first time a server
+does that, `ask` quietly asks it again for the whole reply and remembers it in
+`~/.eds_tui/stream-quirks.json` for a week, so from then on its tool requests are
+asked for whole replies straight away (generated once, no warning). Requests without
+tools still stream.
+
 Independently of direct nodes, a reply that sends nothing for too long is
 abandoned and retried (so the hub moves on to another node): 20s for a
 small request, more for a long conversation (+1s per 2,000 characters, at

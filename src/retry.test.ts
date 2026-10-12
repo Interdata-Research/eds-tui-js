@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isTransient, describeError, withRetries, normalizeToolCalls, firstPartDeadlineMs } from "./retry.js";
+import { isTransient, describeError, withRetries, normalizeToolCalls, firstPartDeadlineMs, wholeReplyDeadlineMs } from "./retry.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { useQuirksFile } from "./stream-quirks.js";
+
+const QUIRKS_TMP = join(mkdtempSync(join(tmpdir(), "eds-tui-quirks-")), "stream-quirks.json");
+useQuirksFile(QUIRKS_TMP); // never the real ~/.eds_tui
 
 // ollama-js throws this shape for a non-2xx reply but doesn't export the class.
 class ResponseError extends Error {
@@ -168,7 +175,45 @@ test("withRetries: a tool call missing its name (one node's broken streaming) is
   assert.equal(calls, 2);
   assert.equal(slept, 0, "a malformed reply is re-asked right away, non-streaming");
   assert.equal(res.message.tool_calls[0].function.arguments.command, "uname -s");
-  assert.match(retries[0]!, /malformed tool call/);
+  assert.deepEqual(retries, [], "handled quietly: no 'Model request failed' line");
+});
+
+test("withRetries: a server that broke streamed tool calls once gets tool requests whole from then on, even in a later run", async () => {
+  const tools = [{ type: "function", function: { name: "run_command" } }];
+  const seen: boolean[] = [];
+  const brokenServer = () => ({
+    chat: async (req: any) => {
+      seen.push(Boolean(req.stream));
+      if (!req.stream) return { done: true, message: { role: "assistant", content: "", tool_calls: [{ function: { name: "run_command", arguments: { command: "ls" } } }] } };
+      return (async function* () {
+        if (req.tools) yield { done: true, message: { role: "assistant", content: "", tool_calls: [{ index: 0, function: { arguments: "}" } }] } };
+        else yield { done: true, message: { role: "assistant", content: "plain" } };
+      })();
+    },
+  });
+  const a: any = brokenServer();
+  withRetries(a, { delaysMs: [0], server: "https://pod-11434.proxy.runpod.net" });
+  await a.chat({ model: "m", messages: [], tools });
+  assert.deepEqual(seen, [true, false], "the first time: streamed, broken, then whole");
+  await a.chat({ model: "m", messages: [], tools });
+  assert.deepEqual(seen.slice(2), [false], "after that: whole straight away, generated once");
+  await a.chat({ model: "m", messages: [] });
+  assert.deepEqual(seen.slice(3), [true], "a request without tools still streams");
+
+  useQuirksFile(QUIRKS_TMP); // a new ask process: only the file is left
+  const b: any = brokenServer();
+  withRetries(b, { delaysMs: [0], server: "https://pod-11434.proxy.runpod.net" });
+  await b.chat({ model: "m", messages: [], tools });
+  assert.deepEqual(seen.slice(4), [false], "remembered across runs");
+  const other: any = brokenServer();
+  withRetries(other, { delaysMs: [0], server: "http://100.98.75.95:11434" });
+  await other.chat({ model: "m", messages: [], tools });
+  assert.deepEqual(seen.slice(5), [true, false], "another server is tried streaming first");
+});
+
+test("wholeReplyDeadlineMs: a whole reply gets at least three minutes, more for a big request", () => {
+  assert.equal(wholeReplyDeadlineMs(20_000), 180_000);
+  assert.equal(wholeReplyDeadlineMs(90_000), 360_000);
 });
 
 test("withRetries: a stream that sends nothing before the deadline is aborted and retried", async () => {

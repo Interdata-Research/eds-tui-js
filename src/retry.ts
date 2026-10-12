@@ -25,6 +25,7 @@
 // through.
 
 import type { ChatResponse, Ollama, ToolCall } from "ollama";
+import { breaksToolStreams, rememberBrokenToolStreams } from "./stream-quirks.js";
 
 export interface RetryOptions {
   /** Delays before each retry; its length is the number of retries. */
@@ -42,6 +43,26 @@ export interface RetryOptions {
   firstPartTimeoutMs?: number | ((request: any) => number);
   /** false = only re-ask malformed replies; throw any other failure for the caller to handle. */
   retryTransient?: boolean;
+  /** Which server this client talks to (its URL), so stream-quirks.ts can remember that its streamed tool calls break. */
+  server?: string;
+}
+
+/**
+ * A whole (non-streamed) reply gives no early sign of life, so a wedged
+ * server is only noticed when this runs out: generous, since a tool request
+ * can think for a while.
+ */
+export function wholeReplyDeadlineMs(firstPartMs: number): number {
+  return Math.max(180_000, 4 * firstPartMs);
+}
+
+function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new StreamInterruptedError(new Error(`no reply from the model server within ${Math.round(ms / 1000)}s`))), ms);
+  });
+  p.catch(() => {}); // after a timeout nobody waits for it
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
 }
 
 const DEFAULT_DELAYS_MS = [2_000, 5_000, 10_000];
@@ -235,24 +256,30 @@ export function withRetries(client: Ollama, opts: RetryOptions = {}): Ollama {
 
   (client as any).chat = async (request: any) => {
     if (request?.stream) return chat(request);
-    let streamed = true;
+    const hasTools = Array.isArray(request?.tools) && request.tools.length > 0;
+    // A server known to break streamed tool calls gets tool requests whole from the start.
+    let streamed = !(hasTools && breaksToolStreams(opts.server));
     for (let attempt = 0; ; attempt++) {
       try {
         // Each retry waits longer: a wedged node is still dropped quickly, but
         // a busy-yet-healthy one isn't cut off on every attempt.
         if (streamed) return await chatViaStream(chat, request, firstPartTimeoutMs(request) * (attempt + 1));
-        const res = await chat(request);
+        const res = await withDeadline(chat(request), wholeReplyDeadlineMs(firstPartTimeoutMs(request)) * (attempt + 1));
         return { ...res, message: { ...res.message, tool_calls: res.message?.tool_calls && normalizeToolCalls(res.message.tool_calls) } };
       } catch (e) {
         if (attempt >= delays.length || !isTransient(e)) throw e;
         const malformed = e instanceof StreamInterruptedError && e.malformed;
+        if (malformed && streamed) {
+          // Not a sick node, just one whose streaming tool-call output is broken (its
+          // non-streaming output is fine): remember it, and ask again right away for the
+          // whole reply. Nothing to tell the user: it's handled.
+          rememberBrokenToolStreams(opts.server);
+          streamed = false;
+          continue;
+        }
         if (!malformed && opts.retryTransient === false) throw e;
         opts.onRetry?.(attempt + 1, delays.length, describeError(e));
-        // A malformed tool call isn't a sick node, just one whose streaming
-        // tool-call output is broken (its non-streaming output is fine): ask
-        // again right away, non-streaming. Everything else waits a bit first.
-        if (malformed) streamed = false;
-        else await sleep(delays[attempt]!);
+        await sleep(delays[attempt]!);
       }
     }
   };
