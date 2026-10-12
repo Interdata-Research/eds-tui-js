@@ -16,6 +16,7 @@
 
 import type { Ollama, Message } from "ollama";
 import { describeError } from "./retry.js";
+import { isStopped } from "./abort.js";
 import { runCommand } from "./exec.js";
 import { SHELL_TOOLS } from "./tools.js";
 import { FINAL_ANSWER_NUDGE, type ConsultSpecialistFn } from "./agent.js";
@@ -83,6 +84,7 @@ export function makeConsultSpecialist(
           client.chat({ model: specialist, messages, tools: SHELL_TOOLS })
         );
       } catch (e) {
+        if (isStopped(e)) throw e;
         const message = describeError(e);
         ui.printConsultFailure(message);
         return `Consult with ${specialist} failed: ${message}. There is nowhere further to escalate this to — handle it yourself.`;
@@ -125,7 +127,8 @@ export function makeConsultSpecialist(
         })
       );
       result = (response.message.content ?? "").trim();
-    } catch {
+    } catch (e) {
+      if (isStopped(e)) throw e;
       result = "";
     }
 

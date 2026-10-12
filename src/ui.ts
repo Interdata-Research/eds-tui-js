@@ -13,6 +13,7 @@ import ora from "ora";
 import stringWidth from "string-width";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
+import { raceStop } from "./abort.js";
 
 // package.json pins marked to ^12.0.2, NOT the newest release — confirmed
 // live (bisecting actual npm-published versions, not just reading
@@ -43,11 +44,28 @@ export function displayModel(name: string): string {
   return name.replace(/:cloud$/, "");
 }
 
-/** Run fn() while a spinner shows `text`; the spinner is always stopped before fn's result is used, so callers never race it with their own output. */
+/** Where spinner text goes in the interactive session (live.ts's footer) instead of ora. */
+export interface StatusSink {
+  pushStatus(text: string): () => void;
+}
+let statusSink: StatusSink | null = null;
+export function setStatusSink(sink: StatusSink | null): void {
+  statusSink = sink;
+}
+
+/** Run fn() while a spinner shows `text`; the spinner is always stopped before fn's result is used, so callers never race it with their own output. Esc (abort.ts) ends the wait at once. */
 export async function withSpinner<T>(text: string, fn: () => Promise<T>): Promise<T> {
+  if (statusSink) {
+    const done = statusSink.pushStatus(text.trim());
+    try {
+      return await raceStop(fn());
+    } finally {
+      done();
+    }
+  }
   const spinner = ora({ text: chalk.dim.italic(text) }).start();
   try {
-    return await fn();
+    return await raceStop(fn());
   } finally {
     spinner.stop();
   }

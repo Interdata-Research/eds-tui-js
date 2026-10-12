@@ -12,6 +12,7 @@ import ora from "ora";
 import stringWidth from "string-width";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
+import { raceStop } from "./abort.js";
 // package.json pins marked to ^12.0.2, NOT the newest release â€” confirmed
 // live (bisecting actual npm-published versions, not just reading
 // changelogs) that marked-terminal@7.3.0's renderer silently stops parsing
@@ -38,11 +39,24 @@ const BOX_BORDER_AND_PADDING_COLS = 6; // 1 border char + 2 padding each side, Ã
 export function displayModel(name) {
     return name.replace(/:cloud$/, "");
 }
-/** Run fn() while a spinner shows `text`; the spinner is always stopped before fn's result is used, so callers never race it with their own output. */
+let statusSink = null;
+export function setStatusSink(sink) {
+    statusSink = sink;
+}
+/** Run fn() while a spinner shows `text`; the spinner is always stopped before fn's result is used, so callers never race it with their own output. Esc (abort.ts) ends the wait at once. */
 export async function withSpinner(text, fn) {
+    if (statusSink) {
+        const done = statusSink.pushStatus(text.trim());
+        try {
+            return await raceStop(fn());
+        }
+        finally {
+            done();
+        }
+    }
     const spinner = ora({ text: chalk.dim.italic(text) }).start();
     try {
-        return await fn();
+        return await raceStop(fn());
     }
     finally {
         spinner.stop();

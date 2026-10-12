@@ -17,6 +17,7 @@
 //      different code paths in the Python original with different reset
 //      behavior; conflating them would be a real, subtle bug.
 import { describeError } from "./retry.js";
+import { isStopped, throwIfStopped } from "./abort.js";
 import * as skills from "./skills.js";
 import { runCommandOnce } from "./exec.js";
 import { RUN_COMMAND_TOOL, DELEGATE_TOOL, DELEGATE_TASKS_TOOL, LOAD_SKILL_TOOL, CREATE_SKILL_TOOL, CONSULT_SPECIALIST_TOOL, SHELL_TOOLS, } from "./tools.js";
@@ -147,6 +148,8 @@ export async function finalAnswer(deps, messages, activeModel) {
         }));
     }
     catch (e) {
+        if (isStopped(e))
+            throw e;
         ui.printCouldNotProduceFinalAnswer(describeError(e));
         deps.saveHistory(messages);
         return null;
@@ -215,6 +218,7 @@ export async function agenticLoop(deps, messages, initialActiveModel, stats = {}
         return true;
     }
     for (;;) {
+        throwIfStopped();
         turns += 1;
         total += 1;
         stats.turns = total;
@@ -259,6 +263,8 @@ export async function agenticLoop(deps, messages, initialActiveModel, stats = {}
             }));
         }
         catch (e) {
+            if (isStopped(e))
+                throw e; // Esc: not a model failure, nothing to escalate or salvage
             const message = describeError(e);
             if (activeModel === deps.smallModel && deps.smallModel !== deps.mainModel) {
                 ui.printEscalatingOnFailure(deps.smallModel, deps.mainModel, message);
@@ -291,6 +297,7 @@ export async function agenticLoop(deps, messages, initialActiveModel, stats = {}
         if (msg.tool_calls && msg.tool_calls.length > 0) {
             ui.printRunningTools();
             for (const tc of msg.tool_calls) {
+                throwIfStopped();
                 const args = tc.function.arguments ?? {};
                 let output;
                 if (tc.function.name === "delegate_task") {

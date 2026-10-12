@@ -98,7 +98,7 @@ export function wordRight(buf: string, cursor: number): number {
   return i;
 }
 
-export type EscapeKey = "left" | "right" | "wordLeft" | "wordRight" | "home" | "end" | "delete" | null;
+export type EscapeKey = "left" | "right" | "up" | "down" | "wordLeft" | "wordRight" | "home" | "end" | "delete" | null;
 
 /**
  * Parse one escape sequence at the start of `s` (which begins with ESC).
@@ -126,6 +126,10 @@ export function parseEscape(s: string): { key: EscapeKey; length: number } | "in
     const mod = Number(params[1] ?? "1") - 1;
     const wordwise = (mod & 0b110) !== 0;
     switch (final) {
+      case "A": // plain ↑/↓ only; Ctrl/Alt+↑ stay unbound
+        return { key: wordwise ? null : "up", length };
+      case "B":
+        return { key: wordwise ? null : "down", length };
       case "C":
         return { key: wordwise ? "wordRight" : "right", length };
       case "D":
@@ -147,6 +151,8 @@ export function parseEscape(s: string): { key: EscapeKey; length: number } | "in
   if (second === "O") {
     if (s.length < 3) return "incomplete";
     const byFinal: Record<string, EscapeKey> = {
+      A: "up",
+      B: "down",
       C: "right",
       D: "left",
       H: "home",

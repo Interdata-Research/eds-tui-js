@@ -821,3 +821,28 @@ test("compaction: an oversized pre-existing transcript is compacted before the f
   const totalAfter = messages.reduce((n, m) => n + (m.content ?? "").length, 0);
   assert.ok(totalAfter < totalBefore, "the transcript must actually have shrunk");
 });
+
+test("agenticLoop: Esc mid-run stops it without escalating, salvaging or saving a half answer", async () => {
+  const { setRunSignal, stoppableChat, isStopped } = await import("./abort.js");
+  const c = new AbortController();
+  setRunSignal(c.signal);
+  let calls = 0;
+  const client = stoppableChat({
+    chat: async () => {
+      calls++;
+      if (calls === 1) return toolCallResponse("sleep 20"); // the command Esc interrupts
+      return finalResponse("should never be asked for");
+    },
+  }) as unknown as Ollama;
+  const saved: Message[][] = [];
+  setTimeout(() => c.abort(), 300);
+  const started = Date.now();
+  await assert.rejects(
+    agenticLoop(baseDeps(client, { saveHistory: (m) => saved.push(m) }), [{ role: "user", content: "go" }], SMALL),
+    (e) => isStopped(e)
+  );
+  assert.ok(Date.now() - started < 3000);
+  assert.equal(calls, 1, "no escalation, no final-answer salvage after a stop");
+  assert.equal(saved.length, 0);
+  setRunSignal(undefined);
+});

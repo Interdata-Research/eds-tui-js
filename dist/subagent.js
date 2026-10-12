@@ -15,6 +15,7 @@
 //     is why subagent.ts does NOT reuse exec.ts's runCommandOnce: the
 //     console output differs, not just the returned text.
 import { describeError } from "./retry.js";
+import { isStopped } from "./abort.js";
 import { runCommand } from "./exec.js";
 import { SHELL_TOOLS } from "./tools.js";
 import { FINAL_ANSWER_NUDGE } from "./agent.js";
@@ -54,6 +55,8 @@ export function makeDelegateTask(smallModel, cwd, appDir) {
                 response = await ui.withSpinner(`${SUB_INDENT}${ui.displayModel(smallModel)} working...`, () => client.chat({ model: smallModel, messages, tools: SHELL_TOOLS }));
             }
             catch (e) {
+                if (isStopped(e))
+                    throw e;
                 const message = describeError(e);
                 ui.printSubagentFailure(message);
                 return `Delegation failed: ${message}. Handle this subtask yourself.`;
@@ -94,7 +97,9 @@ export function makeDelegateTask(smallModel, cwd, appDir) {
             }));
             result = (response.message.content ?? "").trim();
         }
-        catch {
+        catch (e) {
+            if (isStopped(e))
+                throw e;
             result = "";
         }
         if (!result) {

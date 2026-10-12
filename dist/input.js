@@ -115,6 +115,10 @@ export function parseEscape(s) {
         const mod = Number(params[1] ?? "1") - 1;
         const wordwise = (mod & 0b110) !== 0;
         switch (final) {
+            case "A": // plain ↑/↓ only; Ctrl/Alt+↑ stay unbound
+                return { key: wordwise ? null : "up", length };
+            case "B":
+                return { key: wordwise ? null : "down", length };
             case "C":
                 return { key: wordwise ? "wordRight" : "right", length };
             case "D":
@@ -139,6 +143,8 @@ export function parseEscape(s) {
         if (s.length < 3)
             return "incomplete";
         const byFinal = {
+            A: "up",
+            B: "down",
             C: "right",
             D: "left",
             H: "home",

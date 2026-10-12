@@ -17,6 +17,7 @@
 
 import type { Ollama, Message } from "ollama";
 import { describeError } from "./retry.js";
+import { isStopped } from "./abort.js";
 import { runCommand } from "./exec.js";
 import { SHELL_TOOLS } from "./tools.js";
 import { FINAL_ANSWER_NUDGE, type DelegateTaskFn } from "./agent.js";
@@ -65,6 +66,7 @@ export function makeDelegateTask(smallModel: string, cwd: string, appDir: string
           client.chat({ model: smallModel, messages, tools: SHELL_TOOLS })
         );
       } catch (e) {
+        if (isStopped(e)) throw e;
         const message = describeError(e);
         ui.printSubagentFailure(message);
         return `Delegation failed: ${message}. Handle this subtask yourself.`;
@@ -109,7 +111,8 @@ export function makeDelegateTask(smallModel: string, cwd: string, appDir: string
         })
       );
       result = (response.message.content ?? "").trim();
-    } catch {
+    } catch (e) {
+      if (isStopped(e)) throw e;
       result = "";
     }
 

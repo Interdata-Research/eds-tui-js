@@ -15,6 +15,8 @@ import { resolveModel, pinFor } from "./resolve-model.js";
 import { withNodeRouting, loadNodeConfig, parallelSlots, probeNode } from "./nodes.js";
 import { discoverCached, discoverNodes } from "./discover.js";
 import { fileLeases } from "./leases.js";
+import { stoppableChat } from "./abort.js";
+import { repairAfterStop, runSession } from "./session.js";
 import { buildSystemPrompt } from "./prompt-builder.js";
 import { agenticLoop, HARD_MAX_TURNS } from "./agent.js";
 import { makeDelegateTask } from "./subagent.js";
@@ -105,6 +107,7 @@ function scaffoldSkill(name) {
     ui.say("  Edit the description first — it is all the model sees until the skill loads.\n");
     process.exit(0);
 }
+/** The request and the skill a leading "/name" picks; null (after saying so) when no such skill exists. */
 function extractSkill(userInput) {
     if (!userInput.startsWith("/"))
         return { request: userInput, skill: null };
@@ -116,7 +119,7 @@ function extractSkill(userInput) {
     if (!skill) {
         console.log(chalk.red(`\n  No skill named '${name}'.`));
         printSkills();
-        process.exit(1);
+        return null;
     }
     return { request: rest.trim() || `Run the ${skill.name} skill.`, skill };
 }
@@ -163,13 +166,12 @@ function looksLikeAShellFlag(text) {
     const stripped = text.trim();
     return stripped.startsWith("--") || stripped.startsWith("ask -");
 }
-function shellFlagHint(text) {
+function printShellFlagHint(text) {
     const stripped = text.trim();
     const command = stripped.startsWith("ask ") ? stripped : `ask ${stripped}`;
     console.log(chalk.yellow("  That is a command-line flag, not a question."));
     console.log(chalk.dim(`  Run it from your shell instead:  ${command}`));
     console.log();
-    process.exit(0);
 }
 async function main() {
     const argv = process.argv.slice(2);
@@ -235,6 +237,7 @@ async function main() {
     const nodeConfig = loadNodeConfig(process.env);
     const discovered = discoverFor(nodeConfig, mainModel); // runs while the user types
     withNodeRouting(client, nodeConfig, { retry: { onRetry: ui.printRetrying }, discovered });
+    stoppableChat(client); // Esc in the interactive session ends any model call at once (abort.ts)
     ui.printHeader(process.cwd());
     const cwdShort = basename(process.cwd()) || process.cwd();
     let prior;
@@ -256,55 +259,13 @@ async function main() {
         ui.warn("ask needs an interactive terminal to read your question (stdin is not a TTY).");
         process.exit(1);
     }
-    const { text: raw, cancelled, eof } = await promptLine(ui.buildPromptText(cwdShort));
-    if (cancelled || eof) {
-        console.log(chalk.dim("\nCancelled."));
-        process.exit(0);
-    }
-    const userInput = raw.trim();
-    if (!userInput) {
-        console.log(chalk.dim("No input. Exiting."));
-        process.exit(0);
-    }
-    console.log();
-    if (looksLikeAShellFlag(userInput))
-        shellFlagHint(userInput);
-    const { request, skill: namedSkill } = extractSkill(userInput);
-    const triageFn = (input) => triage(client, input, mainModel, smallModel);
-    let active;
-    let skill;
-    if (forceFast || forceSmart || pinFor(namedSkill, { main: mainModel, small: smallModel })) {
-        ({ model: active, skill } = await resolveModel(request, triageFn, { main: mainModel, small: smallModel }, {
-            forceFast,
-            forceSmart,
-            skill: namedSkill,
-        }));
-    }
-    else {
-        ({ model: active, skill } = await ui.withSpinner("Routing...", () => resolveModel(request, triageFn, { main: mainModel, small: smallModel }, { skill: namedSkill })));
-    }
-    ui.printStatusLine(active, skill?.name);
-    const renderedSkill = skill ? skills.render(skill) : null;
-    const otherSkills = new Map(skills.discover());
-    if (skill)
-        otherSkills.delete(skill.name);
-    const otherSkillsIndex = otherSkills.size > 0 ? skills.indexLines(otherSkills) : null;
-    const slotsNow = parallelSlots(nodeConfig, (await discovered) ?? []);
-    const systemPrompt = buildSystemPrompt({
-        cwd: process.cwd(),
-        appDir: APP_DIR,
-        hardMaxTurns: HARD_MAX_TURNS,
-        activeModel: active,
-        mainModel,
-        skill,
-        renderedSkill,
-        otherSkillsIndex,
-        parallelSlots: slotsNow,
-    });
-    const messages = [{ role: "system", content: systemPrompt }, ...prior, { role: "user", content: request }];
-    const stats = {};
+    const promptText = ui.buildPromptText(cwdShort);
+    // One message per run (the old behavior) for whatever drives ask from a program: the AI
+    // Command Center pastes one message into a pty and waits for ask to exit. A person at a
+    // terminal gets the interactive session (session.ts).
+    const oneShot = argv.includes("--once") || process.env.EDS_TUI_ONESHOT === "1" || Boolean(process.env.CC_TASK_ID);
     const pool = loadPool();
-    await agenticLoop({
+    const deps = {
         client,
         mainModel,
         smallModel,
@@ -314,7 +275,87 @@ async function main() {
         consultSpecialist: makeConsultSpecialist(pool, smallModel, process.cwd(), APP_DIR),
         saveHistory,
         modelPool: pool,
-    }, messages, active, stats);
+    };
+    // messages[0] is rebuilt for every message (its skill and model can differ); the rest carries over.
+    const messages = [{ role: "system", content: "" }, ...prior];
+    /** One message: pick its model and skill, build the system prompt for it, run the loop. */
+    async function answer(request, namedSkill) {
+        const triageFn = (input) => triage(client, input, mainModel, smallModel);
+        let active;
+        let skill;
+        if (forceFast || forceSmart || pinFor(namedSkill, { main: mainModel, small: smallModel })) {
+            ({ model: active, skill } = await resolveModel(request, triageFn, { main: mainModel, small: smallModel }, {
+                forceFast,
+                forceSmart,
+                skill: namedSkill,
+            }));
+        }
+        else {
+            ({ model: active, skill } = await ui.withSpinner("Routing...", () => resolveModel(request, triageFn, { main: mainModel, small: smallModel }, { skill: namedSkill })));
+        }
+        ui.printStatusLine(active, skill?.name);
+        const renderedSkill = skill ? skills.render(skill) : null;
+        const otherSkills = new Map(skills.discover());
+        if (skill)
+            otherSkills.delete(skill.name);
+        const otherSkillsIndex = otherSkills.size > 0 ? skills.indexLines(otherSkills) : null;
+        const slotsNow = parallelSlots(nodeConfig, (await discovered) ?? []);
+        messages[0] = {
+            role: "system",
+            content: buildSystemPrompt({
+                cwd: process.cwd(),
+                appDir: APP_DIR,
+                hardMaxTurns: HARD_MAX_TURNS,
+                activeModel: active,
+                mainModel,
+                skill,
+                renderedSkill,
+                otherSkillsIndex,
+                parallelSlots: slotsNow,
+            }),
+        };
+        messages.push({ role: "user", content: request });
+        const stats = {};
+        await agenticLoop(deps, messages, active, stats);
+    }
+    if (oneShot) {
+        const { text: raw, cancelled, eof } = await promptLine(promptText);
+        if (cancelled || eof) {
+            console.log(chalk.dim("\nCancelled."));
+            process.exit(0);
+        }
+        const userInput = raw.trim();
+        if (!userInput) {
+            console.log(chalk.dim("No input. Exiting."));
+            process.exit(0);
+        }
+        console.log();
+        if (looksLikeAShellFlag(userInput)) {
+            printShellFlagHint(userInput);
+            process.exit(0);
+        }
+        const parsed = extractSkill(userInput);
+        if (!parsed)
+            process.exit(1);
+        await answer(parsed.request, parsed.skill);
+        return;
+    }
+    console.log(chalk.dim("  Keep typing while it works: Enter queues the next message · Esc stops · Ctrl-D exits\n"));
+    await runSession({
+        promptText,
+        run: async (text) => {
+            if (looksLikeAShellFlag(text))
+                return printShellFlagHint(text);
+            const parsed = extractSkill(text);
+            if (parsed)
+                await answer(parsed.request, parsed.skill);
+        },
+        stopped: () => {
+            repairAfterStop(messages);
+            saveHistory(messages);
+        },
+    });
+    process.exit(0);
 }
 main().catch((e) => {
     console.error(chalk.red(`\nUnexpected error: ${e instanceof Error ? e.message : e}`));

@@ -19,6 +19,7 @@
 
 import type { Ollama, Message, Tool } from "ollama";
 import { describeError } from "./retry.js";
+import { isStopped, throwIfStopped } from "./abort.js";
 import * as skills from "./skills.js";
 import { runCommandOnce } from "./exec.js";
 import {
@@ -230,6 +231,7 @@ export async function finalAnswer(
       })
     );
   } catch (e) {
+    if (isStopped(e)) throw e;
     ui.printCouldNotProduceFinalAnswer(describeError(e));
     deps.saveHistory(messages);
     return null;
@@ -309,6 +311,7 @@ export async function agenticLoop(
   }
 
   for (;;) {
+    throwIfStopped();
     turns += 1;
     total += 1;
     stats.turns = total;
@@ -359,6 +362,7 @@ export async function agenticLoop(
         })
       );
     } catch (e) {
+      if (isStopped(e)) throw e; // Esc: not a model failure, nothing to escalate or salvage
       const message = describeError(e);
       if (activeModel === deps.smallModel && deps.smallModel !== deps.mainModel) {
         ui.printEscalatingOnFailure(deps.smallModel, deps.mainModel, message);
@@ -393,6 +397,7 @@ export async function agenticLoop(
     if (msg.tool_calls && msg.tool_calls.length > 0) {
       ui.printRunningTools();
       for (const tc of msg.tool_calls) {
+        throwIfStopped();
         const args = tc.function.arguments ?? {};
         let output: string;
         if (tc.function.name === "delegate_task") {

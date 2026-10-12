@@ -73,3 +73,13 @@ test("runCommandOnce: different commands are not conflated", async () => {
   assert.equal(b, "B");
   assert.equal(seen.size, 2);
 });
+
+test("a timeout ends the command but not something it started in the background (how a dev server gets started)", async () => {
+  const { execSync } = await import("node:child_process");
+  const marker = `bgserver.${process.pid}`;
+  const out = await runCommand(`bash -c 'exec -a "${marker}" sleep 30' & echo started`, tmpdir(), "  ", 500);
+  assert.equal(out, "Error: command timed out after 30 seconds");
+  const alive = execSync(`pgrep -f '^${marker}' || true`, { encoding: "utf8" }).trim();
+  assert.notEqual(alive, "", "the background process is still running");
+  execSync(`kill ${alive.split("\n").join(" ")}`);
+});

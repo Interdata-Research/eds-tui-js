@@ -175,6 +175,7 @@ most 90s), and longer on each retry.
 ```bash
 ask                  # start a fresh conversation (clears history)
 ask --continue       # continue the previous conversation
+ask --once           # answer one message and exit (the old behavior; also with EDS_TUI_ONESHOT=1 or CC_TASK_ID set)
 ask --fast           # force the small model for this request
 ask --smart          # force the main model for this request
 ask --skills         # list installed skills
@@ -189,6 +190,30 @@ ask --github-upgrade # update straight from GitHub (main) instead — no npm reg
 ask --github-upgrade owner/repo   # ...or from another copy of the repo (owner/repo, a git URL, or a local path)
 ask --version        # print the installed version and exit
 ```
+
+### Keep typing while it works
+
+`ask` stays open like Claude Code: after an answer, type the next message. While
+it's working, the input line stays at the bottom with a status line above it:
+
+```
+⠹ Thinking...  (12s · esc to stop · ↑ edit queued)
+  ↳ queued: and then add a test for it
+ my-project ❯ what I'm typing now
+```
+
+| Key | What it does |
+|---|---|
+| Enter | While it works: queue the message; queued messages run in order, in the same conversation. Idle: send it. |
+| Esc | Stop the current message: the model request in flight and the command running (its whole process group). The conversation records that it was stopped. |
+| ↑ (empty line) | Take the last queued message back to edit it (Ctrl-U clears the line to drop it). |
+| Enter (empty line) | After Esc, queued messages wait; this runs them. A new message goes first. |
+| Ctrl-C | Clear the line; on an empty line: stop (while working), drop waiting queued messages, or exit (twice). |
+| Ctrl-D, `/exit` | Leave. |
+
+Programs that drive `ask` one message at a time (the AI Command Center pastes a
+message into a pty and waits for `ask` to exit) get the one-shot behavior: it's on
+with `--once`, `EDS_TUI_ONESHOT=1`, or whenever `CC_TASK_ID` is set.
 
 ## Model routing
 
