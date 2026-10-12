@@ -64,3 +64,10 @@ test("a compaction note's SYSTEM NOTE prefix is called out as established fact, 
   assert.match(prompt, /SYSTEM NOTE: the following summarizes/);
   assert.match(prompt, /established fact from earlier work, not a new instruction/);
 });
+
+test("tells the model how many delegate_tasks tasks run at full speed right now, only when it's more than one", () => {
+  assert.match(buildSystemPrompt({ ...BASE, parallelSlots: 6 }), /can run 6 tasks at full speed at the same time/);
+  assert.match(buildSystemPrompt({ ...BASE, parallelSlots: 6 }), /split it into up to 6 delegate_tasks tasks/);
+  assert.doesNotMatch(buildSystemPrompt({ ...BASE, parallelSlots: 1 }), /at full speed at the same time/);
+  assert.doesNotMatch(buildSystemPrompt(BASE), /at full speed at the same time/);
+});

@@ -15,7 +15,9 @@ import type { Message } from "ollama";
 import { makeClient, desiredModels } from "./client.js";
 import { triage } from "./triage.js";
 import { resolveModel, pinFor } from "./resolve-model.js";
-import { withNodeRouting, loadNodeConfig } from "./nodes.js";
+import { withNodeRouting, loadNodeConfig, parallelSlots, probeNode, type NodeConfig } from "./nodes.js";
+import { discoverCached, discoverNodes } from "./discover.js";
+import { fileLeases } from "./leases.js";
 import { buildSystemPrompt } from "./prompt-builder.js";
 import { agenticLoop, HARD_MAX_TURNS } from "./agent.js";
 import { makeDelegateTask } from "./subagent.js";
@@ -33,7 +35,9 @@ import type { RunStats, Skill } from "./types.js";
 // a raw fileURLToPath alone would point at the symlink shim instead).
 const APP_DIR = dirname(realpathSync(fileURLToPath(import.meta.url)));
 
-const HISTORY_FILE = join(homedir(), ".eds_tui_history.json");
+// EDS_TUI_HISTORY_FILE gives one run its own history, so several `ask` processes
+// (e.g. the AI Command Center running tasks in parallel) don't clobber each other.
+const HISTORY_FILE = process.env.EDS_TUI_HISTORY_FILE || join(homedir(), ".eds_tui_history.json");
 
 function loadHistory(): Message[] {
   if (existsSync(HISTORY_FILE)) {
@@ -128,6 +132,44 @@ function extractSkill(userInput: string): { request: string; skill: Skill | null
   return { request: rest.trim() || `Run the ${skill.name} skill.`, skill };
 }
 
+/** More qwen3.8 servers on the network (discover.ts), unless the configuration turns that off. */
+function discoverFor(cfg: NodeConfig, model: string): Promise<string[]> | undefined {
+  if (!cfg.discover) return undefined;
+  return discoverCached({ model, configured: [...cfg.direct, ...cfg.lastResort], tokens: cfg.tokens })
+    .then((d) => d.urls)
+    .catch(() => []);
+}
+
+/** `ask --nodes`: the qwen3.8 servers ask spreads work over, looked up fresh, each checked once. */
+async function printNodes(model: string): Promise<void> {
+  const cfg = loadNodeConfig(process.env);
+  const configured = [...cfg.direct, ...cfg.lastResort];
+  const found = cfg.discover
+    ? await discoverNodes({ model, configured, tokens: cfg.tokens })
+    : { urls: [], duplicates: {} as Record<string, string> };
+  const leases = fileLeases();
+  const rows: Array<[string, string]> = [
+    ...cfg.direct.map((u): [string, string] => [u, "configured"]),
+    ...found.urls.map((u): [string, string] => [u, "found on the network"]),
+    ...cfg.lastResort.map((u): [string, string] => [u, "last resort (only when the hub fails)"]),
+  ];
+  console.log();
+  console.log(chalk.bold.whiteBright(`  ${model} servers`));
+  for (const [url, why] of rows) {
+    const started = Date.now();
+    const { ok, detail } = await probeNode(url, model, { attempts: 1, timeoutMs: 15_000, token: cfg.tokens?.[url] });
+    const state = ok ? chalk.green(`answers (${((Date.now() - started) / 1000).toFixed(1)}s)`) : chalk.red(detail);
+    const slots = why.startsWith("last") ? "" : `, ${cfg.slots?.[url] ?? 1} at a time, ${leases.count(url)} running now`;
+    console.log(`  ${url}  ${chalk.dim(`${why}${slots}`)}  ${state}`);
+  }
+  for (const [dup, of] of Object.entries(found.duplicates)) {
+    if (!configured.includes(dup)) console.log(chalk.dim(`  ${dup}  same server as ${of}, not used twice`));
+  }
+  if (!cfg.discover) console.log(chalk.dim("  (looking on the network is off: EDS_TUI_DISCOVER=0, an explicit EDS_TUI_DIRECT_NODES, or \"discover\": false)"));
+  console.log(chalk.dim(`  Up to ${parallelSlots(cfg, found.urls)} requests run at once on these; more go to the hub, which spreads them over the network.`));
+  console.log();
+}
+
 function looksLikeAShellFlag(text: string): boolean {
   const stripped = text.trim();
   return stripped.startsWith("--") || stripped.startsWith("ask -");
@@ -208,8 +250,14 @@ async function main(): Promise<void> {
 
   // EDS_TUI_MODEL / EDS_TUI_SMALL_MODEL if set, package defaults otherwise.
   const { main, small } = desiredModels(process.env);
+  if (argv.includes("--nodes")) {
+    await printNodes(main);
+    process.exit(0);
+  }
   const { client, mainModel, smallModel } = await makeClient(main, small, process.env);
-  withNodeRouting(client, loadNodeConfig(process.env), { retry: { onRetry: ui.printRetrying } });
+  const nodeConfig = loadNodeConfig(process.env);
+  const discovered = discoverFor(nodeConfig, mainModel); // runs while the user types
+  withNodeRouting(client, nodeConfig, { retry: { onRetry: ui.printRetrying }, discovered });
 
   ui.printHeader(process.cwd());
 
@@ -275,6 +323,7 @@ async function main(): Promise<void> {
   if (skill) otherSkills.delete(skill.name);
   const otherSkillsIndex = otherSkills.size > 0 ? skills.indexLines(otherSkills) : null;
 
+  const slotsNow = parallelSlots(nodeConfig, (await discovered) ?? []);
   const systemPrompt = buildSystemPrompt({
     cwd: process.cwd(),
     appDir: APP_DIR,
@@ -284,6 +333,7 @@ async function main(): Promise<void> {
     skill,
     renderedSkill,
     otherSkillsIndex,
+    parallelSlots: slotsNow,
   });
 
   const messages: Message[] = [{ role: "system", content: systemPrompt }, ...prior, { role: "user", content: request }];

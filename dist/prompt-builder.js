@@ -10,7 +10,7 @@
 // unit-testable without a live ~/.eds_tui/skills directory. Phase 5's
 // agent.ts is what actually calls skills.ts and passes the results in.
 export function buildSystemPrompt(opts) {
-    const { cwd, appDir, hardMaxTurns, activeModel, mainModel, skill, renderedSkill, otherSkillsIndex } = opts;
+    const { cwd, appDir, hardMaxTurns, activeModel, mainModel, skill, renderedSkill, otherSkillsIndex, parallelSlots } = opts;
     let prompt = "You are 'eds tui', a helpful terminal assistant invoked as 'ask', running on " +
         "Ubuntu Linux. " +
         `The user's current working directory is: ${cwd}. ` +
@@ -55,6 +55,11 @@ export function buildSystemPrompt(opts) {
         "results — hand them all to it at once rather than calling delegate_task repeatedly: " +
         "they run at the same time as each other, not one after another. Use delegate_task " +
         "for one task, delegate_tasks for several unrelated ones. " +
+        (parallelSlots && parallelSlots > 1
+            ? `Right now the network's qwen3.8 servers can run ${parallelSlots} tasks at full speed at the same ` +
+                `time (more still run, sharing the network), so when a job splits into independent parts, ` +
+                `split it into up to ${parallelSlots} delegate_tasks tasks. `
+            : "") +
         "If a create_skill tool is available to you, use it when the user asks you to " +
         "remember a procedure, or to write or update a skill. Put the specific subject in " +
         "the description — that one line is all that future requests are matched against — " +

@@ -113,7 +113,7 @@ export EDS_TUI_LAST_RESORT_NODES="http://100.98.75.95:11434"         # comma-sep
 
 Each request goes, in order, to:
 
-1. a **direct node** that passes its quick checks;
+1. the **least busy direct node** with a free slot that passes its quick checks;
 2. the **hub**, one attempt;
 3. if that attempt fails or sends nothing in time (every node behind the
    hub busy or not responding), a **last-resort node** that passes its
@@ -125,6 +125,45 @@ A quick check is a one-token reply, asked for twice with a 3s deadline each
 that instantly). A passed check is trusted for 20s; a node that fails one,
 or fails a request, is skipped for 60s before it's checked again. While the
 hub is answering, last-resort nodes aren't contacted at all.
+
+### Running work in parallel over every qwen3.8 server
+
+`delegate_tasks` runs its sub-agents at the same time, and several `ask`s can
+run at once (the AI Command Center runs up to 6). So direct nodes aren't
+tried in list order: each request goes to the one with the **fewest requests
+in flight** that still has a free slot. When all of them are full, it goes to
+the hub, which spreads it over the rest of the network.
+
+- **Slots**: how many requests a node takes at once, `{"url": "...", "slots": 4}`
+  in nodes.json (default 1). A plain Ollama answers one request at a time at
+  full speed; RunPod batches several but gets slower for each one it adds
+  (measured: 8.4s alone, 18.5s each for 3 at once). So the second request is
+  better off on an idle node than on a busy RunPod.
+- **Counted across every ask on this machine**: one empty file per request in
+  flight under `~/.eds_tui/inflight/` (files left by a process that died are
+  ignored and removed).
+- **Found automatically**: `ask` also looks for qwen3.8 servers among the
+  online Tailscale peers (`http://<peer>:11434`) and adds them with one slot
+  each. One server reachable under two addresses (a RunPod pod at its proxy
+  URL and at its Tailscale IP) is recognised by its model list, including
+  each model's pull time, and used once. The result is cached in
+  `~/.eds_tui/discovered.json` for 10 minutes. Turn this off with
+  `EDS_TUI_DISCOVER=0` or `"discover": false` in nodes.json; an explicit
+  `EDS_TUI_DIRECT_NODES` is also used exactly as given.
+- The model is told how many tasks can run at full speed right now, so it
+  splits independent work into that many `delegate_tasks` tasks.
+- `ask --nodes` lists the servers, their slots, what's running on each now,
+  and checks each one.
+
+```json
+{
+  "nodes": [
+    {"url": "https://xxxx-11434.proxy.runpod.net", "slots": 4},
+    {"url": "http://100.98.75.95:11434", "slots": 1}
+  ],
+  "lastResort": []
+}
+```
 
 Independently of direct nodes, a reply that sends nothing for too long is
 abandoned and retried (so the hub moves on to another node): 20s for a
@@ -142,6 +181,7 @@ ask --skills         # list installed skills
 ask --skill-new NAME # scaffold a new skill
 ask --login          # save a validated hub URL + relay API key to ~/.eds_tui/credentials.json
 ask --whoami         # show the saved login and re-check it still works
+ask --nodes          # the qwen3.8 servers ask spreads work over, and whether each answers
 ask --logout         # remove the saved login
 ask --test           # self-check: prove routing, skills, delegation, escalation, specialist routing and consult work
 ask --upgrade        # update to the latest published version (npm install -g eds-tui@latest)
@@ -381,6 +421,8 @@ By default, every run of `ask` starts a completely fresh conversation. Use
 `ask --continue` to keep the context going across multiple runs — history is
 saved to `~/.eds_tui_history.json` after each response, and running `ask`
 without `--continue` always clears it.
+`EDS_TUI_HISTORY_FILE=/some/file.json` gives a run its own history file instead,
+so several `ask` processes can run at once without clobbering each other.
 
 ## How it works
 

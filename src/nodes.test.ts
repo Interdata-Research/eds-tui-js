@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadNodeConfig, probeNode, withNodeRouting } from "./nodes.js";
+import { loadNodeConfig, parallelSlots, probeNode, withNodeRouting } from "./nodes.js";
+import { memoryLeases } from "./leases.js";
 
 const NODE = "https://pod-11434.proxy.runpod.net";
 const LAST = "http://100.98.75.95:11434";
@@ -24,20 +25,21 @@ test("loadNodeConfig: env wins per list, is comma-separated, trims trailing slas
     const cfg = loadNodeConfig({ EDS_TUI_DIRECT_NODES: ` ${NODE}/ , junk, http://lan:11434` }, path);
     assert.deepEqual(cfg.direct, [NODE, "http://lan:11434"]);
     assert.deepEqual(cfg.lastResort, [LAST], "the other list still comes from the file");
-    assert.deepEqual(loadNodeConfig({ EDS_TUI_DIRECT_NODES: "", EDS_TUI_LAST_RESORT_NODES: "" }, path), { direct: [], lastResort: [], tokens: {} }, "empty env vars turn the lists off");
+    assert.deepEqual(loadNodeConfig({ EDS_TUI_DIRECT_NODES: "", EDS_TUI_LAST_RESORT_NODES: "" }, path), { direct: [], lastResort: [], tokens: {}, slots: {}, discover: false }, "empty env vars turn the lists (and looking for more) off");
   });
 });
 
 test("loadNodeConfig: falls back to the file, and to none when it is missing or bad", () => {
-  withTempFile(JSON.stringify({ nodes: [`${NODE}/`] }), (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [NODE], lastResort: [], tokens: {} }));
-  withTempFile(null, (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [], lastResort: [], tokens: {} }));
-  withTempFile("{not json", (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [], lastResort: [], tokens: {} }));
+  const none = { tokens: {}, slots: {}, discover: true };
+  withTempFile(JSON.stringify({ nodes: [`${NODE}/`] }), (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [NODE], lastResort: [], ...none }));
+  withTempFile(null, (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [], lastResort: [], ...none }));
+  withTempFile("{not json", (path) => assert.deepEqual(loadNodeConfig({}, path), { direct: [], lastResort: [], ...none }));
 });
 
 test("loadNodeConfig: an entry can be {url, token} (a node behind an authenticating proxy, possibly under a path)", () => {
   const proxied = "http://98.116.214.11:11434/nvidia1";
   withTempFile(JSON.stringify({ lastResort: [{ url: `${proxied}/`, token: " s3cret " }, LAST, { url: "not-a-url", token: "x" }] }), (path) => {
-    assert.deepEqual(loadNodeConfig({}, path), { direct: [], lastResort: [proxied, LAST], tokens: { [proxied]: "s3cret" } });
+    assert.deepEqual(loadNodeConfig({}, path), { direct: [], lastResort: [proxied, LAST], tokens: { [proxied]: "s3cret" }, slots: {}, discover: true });
   });
 });
 
@@ -133,6 +135,7 @@ function setup(o: SetupOptions) {
       onStateChange: (url, usable) => changes.push(`${url === NODE ? "direct" : "last"} ${usable ? "usable" : "skipped"}`),
       now: () => t,
       retry: { delaysMs: [0, 0], sleep: async () => {}, onRetry: (_a, _n, why) => retries.push(why) },
+      leases: memoryLeases(),
     }
   );
   return { hub, direct, last, probes, changes, retries, advance: (ms: number) => (t += ms) };
@@ -205,4 +208,69 @@ test("routing: no nodes configured still gets the hub's retries", async () => {
   const s = setup({ hubFails: [GATEWAY] });
   assert.equal((await ask(s)).message.content, "from hub");
   assert.equal(s.hub.seen.length, 2);
+});
+
+test("loadNodeConfig: an entry can say how many requests it takes at once; EDS_TUI_DISCOVER=0 or \"discover\": false stop looking for more", () => {
+  withTempFile(JSON.stringify({ nodes: [{ url: NODE, slots: 4 }, { url: LAST, slots: 0 }, "http://n3:11434"] }), (path) => {
+    const cfg = loadNodeConfig({}, path);
+    assert.deepEqual(cfg.slots, { [NODE]: 4 }, "a bad slot count falls back to the default of 1");
+    assert.equal(parallelSlots(cfg), 6);
+    assert.equal(parallelSlots(cfg, ["http://found:11434", NODE]), 7, "found servers add one each; known ones aren't counted twice");
+    assert.equal(loadNodeConfig({ EDS_TUI_DISCOVER: "0" }, path).discover, false);
+  });
+  withTempFile(JSON.stringify({ discover: false }), (path) => assert.equal(loadNodeConfig({}, path).discover, false));
+});
+
+/** Direct nodes whose replies take `ms`; records which node each request reached. */
+function parallelSetup(nodeSlots: Record<string, number>, discovered?: string[], ms = 30) {
+  const order: string[] = [];
+  const slow = (from: string) => ({
+    chat: async () => {
+      order.push(from);
+      return (async function* () {
+        await new Promise((r) => setTimeout(r, ms));
+        yield { done: true, message: { role: "assistant", content: `from ${from}` } };
+      })();
+    },
+  });
+  const hub = slow("hub") as any;
+  const urls = Object.keys(nodeSlots);
+  withNodeRouting(
+    hub,
+    { direct: discovered ? urls.slice(0, 1) : urls, lastResort: [], slots: nodeSlots },
+    {
+      probe: async () => ({ ok: true, detail: "ok" }),
+      makeClient: (url) => slow(url) as any,
+      retry: { delaysMs: [0], sleep: async () => {} },
+      leases: memoryLeases(),
+      discovered: discovered ? Promise.resolve(discovered) : undefined,
+    }
+  );
+  const many = (n: number) =>
+    Promise.all(Array.from({ length: n }, () => hub.chat({ model: "qwen3.8:latest", messages: [] }))).then((rs: any[]) =>
+      rs.map((r) => r.message.content.replace("from ", ""))
+    );
+  return { many, order };
+}
+
+test("routing: parallel requests go to the least busy node, not all to the first one", async () => {
+  const A = "http://runpod", B = "http://n98", C = "http://n3";
+  const s = parallelSetup({ [A]: 3, [B]: 1, [C]: 1 });
+  const got = await s.many(5);
+  assert.deepEqual(s.order, [A, B, C, A, A], "one each first, then the node with free slots");
+  assert.deepEqual([...got].sort(), [A, A, A, C, B].sort());
+});
+
+test("routing: when every node's slots are full, the rest go to the hub instead of waiting", async () => {
+  const A = "http://runpod", B = "http://n98";
+  const s = parallelSetup({ [A]: 2, [B]: 1 });
+  assert.deepEqual((await s.many(5)).sort(), [A, A, B, "hub", "hub"].sort());
+  // ...and once they're done, the nodes are free again.
+  assert.deepEqual((await s.many(1)), [A]);
+});
+
+test("routing: servers found on the network join the direct nodes with one slot each", async () => {
+  const A = "http://runpod", FOUND = "http://100.98.75.95:11434";
+  const s = parallelSetup({ [A]: 1 }, [FOUND]);
+  assert.deepEqual((await s.many(3)).sort(), [A, FOUND, "hub"].sort());
 });
