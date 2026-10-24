@@ -9,11 +9,14 @@ import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import chalk from "chalk";
-import { makeClient, desiredModels } from "./client.js";
+import { Ollama } from "ollama";
+import { makeClient, desiredModels, jsonErrors } from "./client.js";
+import { loadCredentials } from "./credentials.js";
 import { triage } from "./triage.js";
 import { resolveModel, pinFor } from "./resolve-model.js";
-import { withNodeRouting, loadNodeConfig, parallelSlots, probeNode } from "./nodes.js";
+import { withNodeRouting, loadNodeConfig, parallelSlots, isRelayOnly, relayName } from "./nodes.js";
 import { discoverCached, discoverNodes } from "./discover.js";
+import { ranked, refreshRanking, strength } from "./ranking.js";
 import { fileLeases } from "./leases.js";
 import { stoppableChat } from "./abort.js";
 import { repairAfterStop, runSession } from "./session.js";
@@ -123,43 +126,96 @@ function extractSkill(userInput) {
     }
     return { request: rest.trim() || `Run the ${skill.name} skill.`, skill };
 }
-/** More qwen3.8 servers on the network (discover.ts), unless the configuration turns that off. */
-function discoverFor(cfg, model) {
+const NOTHING_FOUND = { urls: [], duplicates: {}, small: [] };
+/** More qwen3.8 servers and smaller qwens on the network (discover.ts), unless the configuration turns that off. */
+function discoveryFor(cfg, model) {
     if (!cfg.discover)
         return undefined;
-    return discoverCached({ model, configured: [...cfg.direct, ...cfg.lastResort], tokens: cfg.tokens })
-        .then((d) => d.urls)
-        .catch(() => []);
+    const configured = [...cfg.direct, ...cfg.lastResort].filter((u) => !isRelayOnly(u));
+    return discoverCached({ model, configured, tokens: cfg.tokens }).catch(() => NOTHING_FOUND);
 }
-/** `ask --nodes`: the qwen3.8 servers ask spreads work over, looked up fresh, each checked once. */
+/** The relay that carries nodes' requests (pinned to each), from EDS_TUI_URL/TOKEN or `ask --login`; none when it
+ *  isn't an https relay, or EDS_TUI_VIA_RELAY=0. */
+function relayFor(env) {
+    if (env.EDS_TUI_VIA_RELAY === "0")
+        return undefined;
+    const saved = env.EDS_TUI_URL || env.EDS_TUI_TOKEN ? undefined : loadCredentials();
+    const url = (env.EDS_TUI_URL ?? saved?.hubUrl ?? "").replace(/\/+$/, "");
+    const token = env.EDS_TUI_TOKEN ?? saved?.token ?? "";
+    return /^https:\/\//.test(url) ? { url, ...(token ? { token } : {}) } : undefined;
+}
+/** A configured address's name on the relay: its tailnet twin, which discover.ts saw as the same server. */
+function relayNames(d) {
+    const names = {};
+    for (const [twin, of] of Object.entries(d.duplicates))
+        names[of] ??= twin;
+    return names;
+}
+/** How a server's benchmark goes: through the relay pinned to it, then straight (ranking.ts). */
+function routesFor(cfg, relay, names) {
+    return (url) => [
+        ...(relay
+            ? [{ url: relay.url, headers: { ...(relay.token ? { Authorization: `Bearer ${relay.token}` } : {}), "X-Interdata-Node": relayName(url, names) } }]
+            : []),
+        ...(isRelayOnly(url) ? [] : [{ url, headers: cfg.tokens?.[url] ? { Authorization: `Bearer ${cfg.tokens[url]}` } : {} }]),
+    ];
+}
+/** The AI Command Center's router answers (a quick metadata call). */
+async function routerUp(r) {
+    try {
+        const res = await fetch(`${r.url}/api/version`, {
+            headers: r.token ? { Authorization: `Bearer ${r.token}` } : {},
+            signal: AbortSignal.timeout(2_000),
+        });
+        return res.ok;
+    }
+    catch {
+        return false;
+    }
+}
+/** `ask --nodes`: the qwen servers ask uses, looked up and benchmarked fresh, strongest first. */
 async function printNodes(model) {
     const cfg = loadNodeConfig(process.env);
-    const configured = [...cfg.direct, ...cfg.lastResort];
-    const found = cfg.discover
-        ? await discoverNodes({ model, configured, tokens: cfg.tokens })
-        : { urls: [], duplicates: {} };
-    const leases = fileLeases();
-    const rows = [
-        ...cfg.direct.map((u) => [u, "configured"]),
-        ...found.urls.map((u) => [u, "found on the network"]),
-        ...cfg.lastResort.map((u) => [u, "last resort (only when the hub fails)"]),
-    ];
     console.log();
-    console.log(chalk.bold.whiteBright(`  ${model} servers`));
-    for (const [url, why] of rows) {
-        const started = Date.now();
-        const { ok, detail } = await probeNode(url, model, { attempts: 1, timeoutMs: 15_000, token: cfg.tokens?.[url] });
-        const state = ok ? chalk.green(`answers (${((Date.now() - started) / 1000).toFixed(1)}s)`) : chalk.red(detail);
-        const slots = why.startsWith("last") ? "" : `, ${cfg.slots?.[url] ?? 1} at a time, ${leases.count(url)} running now`;
-        console.log(`  ${url}  ${chalk.dim(`${why}${slots}`)}  ${state}`);
+    if (cfg.router && !process.env.EDS_TUI_URL) {
+        const up = await routerUp(cfg.router);
+        console.log(chalk.bold.whiteBright("  AI Command Center router"));
+        console.log(`  ${cfg.router.url}  ${up ? chalk.green("answers: every request goes there (it ranks and spreads them for this whole machine)") : chalk.red("doesn't answer: ask routes by itself, below")}`);
+        console.log();
     }
+    const configured = [...cfg.direct, ...cfg.lastResort];
+    const reachable = configured.filter((u) => !isRelayOnly(u));
+    const found = cfg.discover ? await discoverNodes({ model, configured: reachable, tokens: cfg.tokens }) : NOTHING_FOUND;
+    const relay = relayFor(process.env);
+    const leases = fileLeases();
+    const direct = [...cfg.direct, ...found.urls];
+    console.log(chalk.dim(`  Benchmarking ${direct.length} server(s)…`));
+    const ranking = await refreshRanking({
+        urls: direct, model, modelFor: (u) => found.models?.[u], routesFor: routesFor(cfg, relay, relayNames(found)), leases, force: true,
+    });
+    const why = (u) => (isRelayOnly(u) ? "configured, through the relay only" : cfg.direct.includes(u) ? "configured" : "found on the network");
+    console.log(chalk.bold.whiteBright(`  ${model} servers, strongest first`));
+    ranked(direct, ranking, cfg.slots).forEach((url, i) => {
+        const m = ranking[url];
+        const state = m
+            ? chalk.green(`benchmark ${m.est.toFixed(1)}s, ${strength(m, cfg.slots?.[url] ?? 1).toFixed(2)} requests/s with every slot busy`)
+            : chalk.red("didn't answer the benchmark");
+        console.log(`  ${i + 1}. ${url}  ${chalk.dim(`${why(url)}, ${cfg.slots?.[url] ?? 1} at a time, ${leases.count(url)} running now`)}  ${state}`);
+    });
+    for (const s of found.small)
+        console.log(`  ·  ${s.url}  ${chalk.dim(`${s.model} (${s.params}B): small jobs when every ${model} server is busy`)}`);
+    for (const s of found.idle ?? [])
+        console.log(`  ·  ${s.url}  ${chalk.dim(`has ${s.model}, not loaded: not used (never made to load it)`)}`);
+    for (const url of cfg.lastResort)
+        console.log(`  ·  ${url}  ${chalk.dim("last resort (only when the hub fails)")}`);
     for (const [dup, of] of Object.entries(found.duplicates)) {
         if (!configured.includes(dup))
-            console.log(chalk.dim(`  ${dup}  same server as ${of}, not used twice`));
+            console.log(chalk.dim(`  ${dup}  same server as ${of}, not used twice${relay ? " (its name on the relay)" : ""}`));
     }
     if (!cfg.discover)
         console.log(chalk.dim("  (looking on the network is off: EDS_TUI_DISCOVER=0, an explicit EDS_TUI_DIRECT_NODES, or \"discover\": false)"));
     console.log(chalk.dim(`  Up to ${parallelSlots(cfg, found.urls)} requests run at once on these; more go to the hub, which spreads them over the network.`));
+    console.log(chalk.dim(relay ? `  Requests go through the relay ${relay.url}, pinned to each server, so it logs them.` : "  Requests go straight to each server (no https relay configured)."));
     console.log();
 }
 function looksLikeAShellFlag(text) {
@@ -233,10 +289,38 @@ async function main() {
         await printNodes(main);
         process.exit(0);
     }
-    const { client, mainModel, smallModel } = await makeClient(main, small, process.env);
+    let { client, mainModel, smallModel } = await makeClient(main, small, process.env);
     const nodeConfig = loadNodeConfig(process.env);
-    const discovered = discoverFor(nodeConfig, mainModel); // runs while the user types
-    withNodeRouting(client, nodeConfig, { retry: { onRetry: ui.printRetrying }, discovered });
+    const relay = relayFor(process.env);
+    let discovered;
+    if (nodeConfig.router && !process.env.EDS_TUI_URL && (await routerUp(nodeConfig.router))) {
+        // The AI Command Center's router on this machine ranks and spreads every request of every ask and task here
+        // (strongest qwen first, through the relay); the relay itself is the last resort if the router fails.
+        const r = nodeConfig.router;
+        client = new Ollama({ host: r.url, headers: r.token ? { Authorization: `Bearer ${r.token}` } : {}, fetch: jsonErrors(fetch) });
+        mainModel = main;
+        smallModel = small;
+        withNodeRouting(client, { direct: [], lastResort: relay ? [relay.url] : [], tokens: relay?.token ? { [relay.url]: relay.token } : {} }, { retry: { onRetry: ui.printRetrying } });
+    }
+    else {
+        const discovery = discoveryFor(nodeConfig, mainModel); // runs while the user types
+        discovered = discovery?.then((d) => d.urls);
+        const names = (discovery ?? Promise.resolve(NOTHING_FOUND)).then(relayNames);
+        withNodeRouting(client, nodeConfig, {
+            retry: { onRetry: ui.printRetrying },
+            discovered,
+            small: discovery?.then((d) => d.small),
+            models: discovery?.then((d) => d.models ?? {}),
+            relay: relay ? { ...relay, names } : undefined,
+        });
+        // Keep the ranking measured (stale ones, idle ones) while this ask runs.
+        void (discovery ?? Promise.resolve(NOTHING_FOUND))
+            .then(async (d) => refreshRanking({
+            urls: [...nodeConfig.direct, ...d.urls], model: mainModel, modelFor: (u) => d.models?.[u],
+            routesFor: routesFor(nodeConfig, relay, relayNames(d)), leases: fileLeases(),
+        }))
+            .catch(() => { });
+    }
     stoppableChat(client); // Esc in the interactive session ends any model call at once (abort.ts)
     ui.printHeader(process.cwd());
     const cwdShort = basename(process.cwd()) || process.cwd();

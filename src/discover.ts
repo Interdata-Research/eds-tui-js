@@ -10,6 +10,17 @@
 // was pulled on that disk: two addresses with the same fingerprint are one
 // server, and the configured address wins.
 //
+// A found peer is used only with a model it already has LOADED (/api/ps): it is
+// never made to load one (Edgar's laptop has qwen3.8:27b, unloaded: loading it
+// would take the laptop over). Such peers are listed as `idle`. The main model
+// under another tag of its family (qwen3.8:27b for qwen3.8:latest, same
+// weights) counts as the main model, sent under that tag (`models`).
+//
+// Smaller qwens (qwen3.5 9B/4B, qwen3 4B…) loaded on peers WITHOUT the main
+// model are kept too, for small jobs when every qwen3.8 server is full
+// (nodes.ts): never on a qwen3.8 server (a second model on its GPU), never
+// cloud, embedding or one-job fine-tunes; the biggest loaded one.
+//
 // The result is cached in ~/.eds_tui/discovered.json for 10 minutes, so most
 // runs don't look at all. Off with EDS_TUI_DISCOVER=0, `"discover": false`
 // in nodes.json, or an explicit EDS_TUI_DIRECT_NODES (an exact list: that's
@@ -25,11 +36,25 @@ export const DISCOVERED_FILE = join(homedir(), ".eds_tui", "discovered.json");
 export const DISCOVERY_MAX_AGE_MS = 10 * 60_000;
 const OLLAMA_PORT = 11434;
 
+export interface SmallServer {
+  url: string;
+  /** The model it takes small jobs with (requests are sent under this name). */
+  model: string;
+  /** Its size in billions of parameters (bigger first). */
+  params: number;
+}
+
 export interface Discovered {
   /** Servers to add to the direct nodes, in the order found. */
   urls: string[];
   /** Addresses left out because they are a configured (or earlier) server under another address. */
   duplicates: Record<string, string>;
+  /** Smaller qwens on servers without the main model, biggest first. */
+  small: SmallServer[];
+  /** Found servers that have the main model under another tag (qwen3.8:27b): the name to send. */
+  models?: Record<string, string>;
+  /** Found servers with the main model NOT loaded: listed, never used. */
+  idle?: Array<{ url: string; model: string }>;
 }
 
 export interface DiscoverOptions {
@@ -65,15 +90,15 @@ export function tailscalePeers(timeoutMs = 2_000): Promise<string[]> {
 }
 
 interface Tags {
-  models?: Array<{ name?: string; digest?: string; modified_at?: string }>;
+  models?: Array<{ name?: string; digest?: string; modified_at?: string; details?: { parameter_size?: string } }>;
 }
 
-async function tags(url: string, o: DiscoverOptions): Promise<Tags | null> {
+async function tags(url: string, o: DiscoverOptions, path = "tags"): Promise<Tags | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), o.timeoutMs ?? 1_500);
   try {
     const token = o.tokens?.[url];
-    const res = await (o.fetchFn ?? fetch)(`${url}/api/tags`, {
+    const res = await (o.fetchFn ?? fetch)(`${url}/api/${path}`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       signal: controller.signal,
     });
@@ -91,13 +116,44 @@ export function fingerprint(t: Tags): string {
   return createHash("sha1").update(models.join("\n")).digest("hex");
 }
 
+/** "4.7B" -> 4.7, "137M" -> 0.137: a model's details.parameter_size in billions; 0 when unknown. */
+export function paramsB(size: string | undefined): number {
+  const m = /^\s*([\d.]+)\s*([BMT])/i.exec(size ?? "");
+  if (!m) return 0;
+  const n = Number(m[1]);
+  const unit = m[2]!.toUpperCase();
+  return unit === "M" ? n / 1000 : unit === "T" ? n * 1000 : n;
+}
+
+const NOT_SMALL = /cloud|embed|rasa|judge|base/i;
+
+const base = (name: string) => name.split(":")[0]!;
+
+/** The main model on a server under any tag of its family (qwen3.8:latest, qwen3.8:27b…), the exact name first. */
+export function familyModel(t: Tags, mainModel: string): string | null {
+  const names = (t.models ?? []).map((m) => m.name ?? "");
+  if (names.includes(mainModel)) return mainModel;
+  return names.find((n) => n && base(n) === base(mainModel) && !NOT_SMALL.test(n)) ?? null;
+}
+
+/** The smaller qwen a server without the main model takes small jobs with: its biggest LOADED one. */
+export function smallModel(t: Tags, loaded: Set<string>, mainModel: string): { model: string; params: number } | null {
+  const qwens = (t.models ?? []).filter(
+    (m) => m.name && /qwen/i.test(m.name) && !NOT_SMALL.test(m.name) && base(m.name) !== base(mainModel) && loaded.has(m.name)
+  );
+  if (!qwens.length) return null;
+  const best = qwens.reduce((a, b) => (paramsB(b.details?.parameter_size) > paramsB(a.details?.parameter_size) ? b : a));
+  return { model: best.name!, params: paramsB(best.details?.parameter_size) };
+}
+
 export async function discoverNodes(o: DiscoverOptions): Promise<Discovered> {
   const found = await (o.candidates ?? (() => tailscalePeers()))();
   const configured = new Set(o.configured);
   const urls = [...o.configured, ...found.filter((u) => !configured.has(u))];
   const replies = await Promise.all(urls.map((u) => tags(u, o)));
   const owner = new Map<string, string>(); // fingerprint -> the address that keeps it
-  const out: Discovered = { urls: [], duplicates: {} };
+  const out: Discovered = { urls: [], duplicates: {}, small: [], models: {}, idle: [] };
+  const others: Array<[string, Tags]> = []; // found peers: the main model loaded, else maybe a smaller qwen
   urls.forEach((url, i) => {
     const t = replies[i];
     if (!t || !(t.models ?? []).length) return;
@@ -108,8 +164,24 @@ export async function discoverNodes(o: DiscoverOptions): Promise<Discovered> {
       return;
     }
     owner.set(fp, url);
-    if (!configured.has(url) && (t.models ?? []).some((m) => m.name === o.model)) out.urls.push(url);
+    if (configured.has(url)) return;
+    others.push([url, t]);
   });
+  const ps = await Promise.all(others.map(([url]) => tags(url, o, "ps")));
+  others.forEach(([url, t], i) => {
+    const loaded = new Set((ps[i]?.models ?? []).map((m) => m.name!).filter(Boolean));
+    const fam = familyModel(t, o.model);
+    if (fam && loaded.has(fam)) {
+      out.urls.push(url);
+      if (fam !== o.model) out.models![url] = fam;
+    } else if (fam) {
+      out.idle!.push({ url, model: fam }); // never made to load it
+    } else {
+      const pick = smallModel(t, loaded, o.model);
+      if (pick) out.small.push({ url, ...pick });
+    }
+  });
+  out.small.sort((a, b) => b.params - a.params);
   return out;
 }
 
@@ -132,7 +204,7 @@ export async function discoverCached(
       c.model === o.model &&
       JSON.stringify(c.configured) === JSON.stringify(o.configured)
     ) {
-      return { urls: c.urls, duplicates: c.duplicates ?? {} };
+      return { urls: c.urls, duplicates: c.duplicates ?? {}, small: c.small ?? [], models: c.models ?? {}, idle: c.idle ?? [] };
     }
   } catch {
     // no cache yet, or unreadable: look now

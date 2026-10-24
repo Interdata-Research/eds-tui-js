@@ -113,12 +113,15 @@ export EDS_TUI_LAST_RESORT_NODES="http://100.98.75.95:11434"         # comma-sep
 
 Each request goes, in order, to:
 
-1. the **least busy direct node** with a free slot that passes its quick checks;
-2. the **hub**, one attempt;
-3. if that attempt fails or sends nothing in time (every node behind the
+1. the **strongest direct node** (see below) with a free slot that passes its
+   quick checks;
+2. a small job (no tools: not an agentic step) when every direct node is full
+   or failing: a **smaller qwen** found on the network, biggest first;
+3. the **hub**, one attempt;
+4. if that attempt fails or sends nothing in time (every node behind the
    hub busy or not responding), a **last-resort node** that passes its
    quick checks;
-4. the hub again, with its full retries.
+5. the hub again, with its full retries.
 
 A quick check is a one-token reply, asked for twice with a 3s deadline each
 (a node's model list answering is not enough — a wedged node still answers
@@ -126,19 +129,49 @@ that instantly). A passed check is trusted for 20s; a node that fails one,
 or fails a request, is skipped for 60s before it's checked again. While the
 hub is answering, last-resort nodes aren't contacted at all.
 
-### Running work in parallel over every qwen3.8 server
+### Every qwen on the network, the strongest first, in parallel when needed
 
 `delegate_tasks` runs its sub-agents at the same time, and several `ask`s can
 run at once (the AI Command Center runs up to 6). So direct nodes aren't
-tried in list order: each request goes to the one with the **fewest requests
-in flight** that still has a free slot. When all of them are full, it goes to
-the hub, which spreads it over the rest of the network.
+tried in list order: each request goes to the **strongest server** that still
+has a free slot.
 
+- **Ranked by a benchmark**, not by hand: every server answers the same
+  request (a ~2.5k-token prompt with a random start, so no cache helps, and
+  64 tokens back) when it's new and every 30 minutes while it's idle; its time
+  is kept in `~/.eds_tui/ranking.json` for every ask on the machine. A new
+  server that answers faster takes the lead by itself. Not measured yet: after
+  the measured ones, in the configured order. `ask --nodes` measures them all.
+- **Strongest first**: a server's strength is what it answers with every slot
+  busy, slots ÷ (benchmark × (1 + 0.6 × (slots − 1))) requests a second (RunPod
+  batches several but slows each by about 0.6 per extra one: 8.4s alone, 18.5s
+  each for 3 at once). Each request goes to the strongest server with a free
+  slot, so RunPod's slots fill first, then the next. Measured: RunPod 0.26/s,
+  the spark 0.21/s (a bit faster alone, but one at a time), vps-3 0.06/s.
 - **Slots**: how many requests a node takes at once, `{"url": "...", "slots": 4}`
-  in nodes.json (default 1). A plain Ollama answers one request at a time at
-  full speed; RunPod batches several but gets slower for each one it adds
-  (measured: 8.4s alone, 18.5s each for 3 at once). So the second request is
-  better off on an idle node than on a busy RunPod.
+  in nodes.json (default 1; a plain Ollama answers one at a time at full speed).
+- **Smaller qwens** (qwen3.5 9B, qwen3.5 4B, qwen3 4B…) found on peers that
+  don't run qwen3.8 (never a second model on a qwen3.8 GPU, never cloud or
+  one-job fine-tunes; the one it has loaded, else its biggest) take small jobs
+  (no tools) when every qwen3.8 server is full, biggest first, under their own
+  model name. Agentic steps go to the hub instead.
+- **Through the relay**: with an https hub (`ask --login`, or `EDS_TUI_URL`),
+  a node's requests go to the hub with `X-Interdata-Node: <node>`, so the relay
+  logs them while the choice stays `ask`'s; a node the relay can't take them
+  to is reached straight for a minute. A configured proxy URL's name on the
+  relay is its Tailscale twin (found below). `EDS_TUI_VIA_RELAY=0`: straight.
+- **Through the relay only**: a server this machine can't reach itself (the
+  spark, whose Ollama takes only keyed requests from outside) can still be one
+  of the direct nodes: `{"relay": "Home", "slots": 1}` in nodes.json (its name
+  on the relay). It's checked, benchmarked and used through the relay, pinned
+  to it, and ranked like the others.
+- **The AI Command Center's router**: on a machine running it, put
+  `"router": {"url": "http://127.0.0.1:8130/llm", "token": "<CC_TOKEN>"}` in
+  nodes.json (or `EDS_TUI_ROUTER_URL` / `EDS_TUI_ROUTER_TOKEN`): every request
+  goes there while it answers, so this machine's asks, tasks and Voice
+  Engineer share one ranking and one count of busy slots; the relay is the
+  last resort if it fails. Ignored when `EDS_TUI_URL` is set (the center's own
+  tasks already point there).
 - **Counted across every ask on this machine**: one empty file per request in
   flight under `~/.eds_tui/inflight/` (files left by a process that died are
   ignored and removed).
@@ -152,8 +185,8 @@ the hub, which spreads it over the rest of the network.
   `EDS_TUI_DIRECT_NODES` is also used exactly as given.
 - The model is told how many tasks can run at full speed right now, so it
   splits independent work into that many `delegate_tasks` tasks.
-- `ask --nodes` lists the servers, their slots, what's running on each now,
-  and checks each one.
+- `ask --nodes` benchmarks the servers and lists them strongest first, with
+  their slots, what's running on each now, and the smaller qwens.
 
 ```json
 {
@@ -189,7 +222,7 @@ ask --skills         # list installed skills
 ask --skill-new NAME # scaffold a new skill
 ask --login          # save a validated hub URL + relay API key to ~/.eds_tui/credentials.json
 ask --whoami         # show the saved login and re-check it still works
-ask --nodes          # the qwen3.8 servers ask spreads work over, and whether each answers
+ask --nodes          # the qwen servers ask uses, benchmarked, strongest first
 ask --logout         # remove the saved login
 ask --test           # self-check: prove routing, skills, delegation, escalation, specialist routing and consult work
 ask --upgrade        # update to the latest published version (npm install -g eds-tui@latest)

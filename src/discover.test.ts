@@ -16,6 +16,7 @@ const SERVERS: Record<string, unknown> = {
   [RUNPOD_TS]: pod,
   [N98]: { models: [{ name: "qwen3.8:latest", digest: "aa", modified_at: "2026-10-02T22:13:13-04:00" }] },
   [OTHER]: { models: [{ name: "llama3.2:3b", digest: "bb", modified_at: "2026-09-01T00:00:00Z" }] },
+  [`${N98}/api/ps`]: { models: [{ name: "qwen3.8:latest" }] }, // loaded: a found server is only used with a loaded model
 };
 
 function fetchFn(seen: string[] = []) {
@@ -34,6 +35,42 @@ test("discoverNodes: finds the peers serving the model, and one server under two
   const d = await discoverNodes({ model: "qwen3.8:latest", configured: [RUNPOD], candidates: peers, fetchFn: fetchFn() });
   assert.deepEqual(d.urls, [N98], "100.65.113.6 is RunPod again; the llama-only and silent peers don't count");
   assert.deepEqual(d.duplicates, { [RUNPOD_TS]: RUNPOD }, "the configured address wins");
+});
+
+test("discoverNodes: smaller qwens on peers without qwen3.8, biggest first, never cloud or fine-tunes", async () => {
+  const P9 = "http://100.85.150.29:11434", P4 = "http://100.96.62.59:11434", MIXED = "http://100.1.2.3:11434";
+  const LAPTOP = "http://100.119.109.55:11434", TAGGED = "http://100.4.5.6:11434";
+  const servers: Record<string, unknown> = {
+    ...SERVERS,
+    [P9]: { models: [
+      { name: "qwen3.5:4b", digest: "c1", details: { parameter_size: "4.7B" } },
+      { name: "qwen3.5:9b", digest: "c2", details: { parameter_size: "9.7B" } },
+      { name: "rasa-judge-qwen3-8b:latest", digest: "c3", details: { parameter_size: "8.2B" } },
+      { name: "qwen3.5:397b-cloud", digest: "c4" },
+    ] },
+    [`${P9}/api/ps`]: { models: [{ name: "qwen3.5:9b" }, { name: "qwen3.5:4b" }] },
+    [P4]: { models: [{ name: "qwen3:4b", digest: "d1", details: { parameter_size: "4.0B" } }, { name: "qwen3.5:2b", digest: "d2", details: { parameter_size: "2.3B" } }] },
+    [`${P4}/api/ps`]: { models: [{ name: "qwen3.5:2b" }] }, // loaded: no model swap
+    [MIXED]: { models: [{ name: "qwen3.8:latest", digest: "e1" }, { name: "qwen3.5:4b", digest: "e2", details: { parameter_size: "4.7B" } }] },
+    [`${MIXED}/api/ps`]: { models: [{ name: "qwen3.8:latest" }, { name: "qwen3.5:4b" }] },
+    [LAPTOP]: { models: [{ name: "qwen3.8:27b", digest: "f1" }, { name: "qwen3:4b", digest: "f2", details: { parameter_size: "4.0B" } }] },
+    [`${LAPTOP}/api/ps`]: { models: [] }, // nothing loaded: never made to load it
+    [TAGGED]: { models: [{ name: "qwen3.8:27b", digest: "g1" }] },
+    [`${TAGGED}/api/ps`]: { models: [{ name: "qwen3.8:27b" }] },
+  };
+  const fetchAll = (async (url: string) => {
+    const body = servers[url.replace(/\/api\/tags$/, "")];
+    if (!body) throw new TypeError("fetch failed");
+    return new Response(JSON.stringify(body), { status: 200 });
+  }) as unknown as typeof fetch;
+  const d = await discoverNodes({ model: "qwen3.8:latest", configured: [RUNPOD], candidates: async () => [N98, P4, P9, MIXED, LAPTOP, TAGGED], fetchFn: fetchAll });
+  assert.deepEqual(d.urls, [N98, MIXED, TAGGED], "a qwen3.8 server with small qwens too is a qwen3.8 server");
+  assert.deepEqual(d.models, { [TAGGED]: "qwen3.8:27b" }, "qwen3.8 under another tag, sent under that tag");
+  assert.deepEqual(d.idle, [{ url: LAPTOP, model: "qwen3.8:27b" }], "not loaded: listed, never used");
+  assert.deepEqual(d.small, [
+    { url: P9, model: "qwen3.5:9b", params: 9.7 },
+    { url: P4, model: "qwen3.5:2b", params: 2.3 },
+  ]);
 });
 
 test("discoverNodes: a configured server is never added again", async () => {

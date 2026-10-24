@@ -30,16 +30,27 @@
 // <token>`, and how many requests it may run at once (default 1). A URL may
 // carry a path (a proxy that serves a node under a prefix).
 //
-// Parallel work: direct nodes aren't tried in list order. Each request goes
-// to the node with the fewest requests in flight (leases.ts counts them
-// across every ask on this machine) that still has a free slot, so
-// delegate_tasks' sub-agents and parallel asks spread over all of them. A
-// single-slot Ollama answers one request at a time at full speed, while a
-// batching one (RunPod) gets slower for every request it adds, so the
-// second request is better off on an idle node than on a busy RunPod. When
-// every node is full the request goes to the hub, which spreads it over the
-// rest of the network. Servers found by discover.ts join the direct nodes
-// with one slot each.
+// Strongest first, in parallel when needed (Edgar, 0.9.0): direct nodes
+// aren't tried in list order. Each request goes to the strongest node with a
+// free slot (ranking.ts: measured throughput with every slot busy, so a new,
+// stronger server leads by itself; leases.ts counts requests in flight across
+// every ask on this machine). So RunPod's slots fill first, then the next
+// server, and delegate_tasks' sub-agents and parallel asks still run at once.
+// Servers found by discover.ts join the direct nodes with one slot each.
+// When every node is full (or failing), a small job (no tools: not an agentic
+// step) goes to a smaller qwen found on the network (biggest first, under its
+// own model name), and anything else to the hub.
+//
+// Through the relay: a node's requests go to the hub (the interdata relay)
+// with X-Interdata-Node = that node, so the relay logs them while the choice
+// stays ours; a node the relay can't take them to is reached straight for a
+// minute. A node's name on the relay is its address there (discover.ts gives
+// a configured proxy URL's tailnet twin).
+//
+// On a machine with the AI Command Center, `"router": {"url", "token"}` in
+// nodes.json (or EDS_TUI_ROUTER_URL / EDS_TUI_ROUTER_TOKEN) sends everything
+// to its router instead (cli.ts), which does all of the above for every ask
+// and task there at once; the relay is the last resort if it's down.
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -47,16 +58,35 @@ import { Ollama } from "ollama";
 import { jsonErrors } from "./client.js";
 import { describeError, withRetries } from "./retry.js";
 import { fileLeases } from "./leases.js";
+import { ranked, readRanking } from "./ranking.js";
 export const NODES_FILE = join(homedir(), ".eds_tui", "nodes.json");
 function normalizeUrl(u) {
     return u.trim().replace(/\/+$/, "");
 }
 /** URLs from a list of strings or {url, token, slots} objects; tokens and slots collected by URL. */
+/** "relay:<name>": a server reached only through the relay, pinned to its name there (relay-only node). */
+export const RELAY_ONLY = "relay:";
+export const isRelayOnly = (url) => url.startsWith(RELAY_ONLY);
 function clean(entries, tokens, slots) {
     const urls = [];
     for (const entry of entries) {
-        const url = typeof entry === "string" ? entry : entry?.url;
-        if (typeof url !== "string" || !/^https?:\/\//.test(url.trim()))
+        // {"relay": "Home"} (or "relay:Home"): a server this machine can't reach itself, through the relay
+        const relayOnly = entry?.relay;
+        const url = typeof entry === "string" ? entry : typeof relayOnly === "string" ? `${RELAY_ONLY}${relayOnly}` : entry?.url;
+        if (typeof url !== "string")
+            continue;
+        if (url.trim().startsWith(RELAY_ONLY)) {
+            const name = url.trim().slice(RELAY_ONLY.length).trim();
+            if (!name)
+                continue;
+            const key = `${RELAY_ONLY}${name}`;
+            const n = entry?.slots;
+            if (typeof n === "number" && Number.isInteger(n) && n >= 1)
+                slots[key] = n;
+            urls.push(key);
+            continue;
+        }
+        if (!/^https?:\/\//.test(url.trim()))
             continue;
         const normalized = normalizeUrl(url);
         const token = entry?.token;
@@ -88,7 +118,7 @@ export function loadNodeConfig(env, path = NODES_FILE) {
         : Array.isArray(fileValue)
             ? clean(fileValue, tokens, slots)
             : [];
-    return {
+    const cfg = {
         direct: pick(env.EDS_TUI_DIRECT_NODES, file.nodes),
         lastResort: pick(env.EDS_TUI_LAST_RESORT_NODES, file.lastResort),
         tokens,
@@ -96,6 +126,13 @@ export function loadNodeConfig(env, path = NODES_FILE) {
         // An explicit EDS_TUI_DIRECT_NODES is the exact list to use.
         discover: env.EDS_TUI_DISCOVER !== "0" && env.EDS_TUI_DIRECT_NODES === undefined && file.discover !== false,
     };
+    const r = (file.router ?? {});
+    const routerUrl = env.EDS_TUI_ROUTER_URL ?? (typeof r.url === "string" ? r.url : "");
+    if (/^https?:\/\//.test(routerUrl.trim())) {
+        const token = env.EDS_TUI_ROUTER_TOKEN ?? (typeof r.token === "string" ? r.token : "");
+        cfg.router = { url: normalizeUrl(routerUrl), ...(token.trim() ? { token: token.trim() } : {}) };
+    }
+    return cfg;
 }
 /**
  * Can this node generate right now? Asks for a one-token reply `attempts`
@@ -114,7 +151,7 @@ export async function probeNode(url, model, opts = {}) {
         try {
             const res = await fetchFn(`${url}/api/chat`, {
                 method: "POST",
-                headers: { "content-type": "application/json", ...authHeaders(opts.token) },
+                headers: { "content-type": "application/json", ...authHeaders(opts.token), ...opts.headers },
                 body: JSON.stringify({
                     model,
                     messages: [{ role: "user", content: "hi" }],
@@ -138,6 +175,10 @@ export async function probeNode(url, model, opts = {}) {
         }
     }
     return { ok: true, detail: `${attempts} quick checks passed` };
+}
+/** A node's name on the relay: a relay-only node's own name, its tailnet twin (a configured proxy URL), else its address. */
+export function relayName(url, names = {}) {
+    return isRelayOnly(url) ? url.slice(RELAY_ONLY.length) : (names[url] ?? url);
 }
 /** How many requests the direct nodes can take at once, counting discovered ones. */
 export function parallelSlots(nodes, discovered = []) {
@@ -166,23 +207,59 @@ export function withNodeRouting(hub, nodes, opts = {}) {
         direct = [...new Set([...nodes.direct, ...found.filter((u) => !nodes.lastResort.includes(u))])];
     }, () => { } // nothing found: the configured nodes and the hub
     );
-    const probe = opts.probe ?? ((url, model) => probeNode(url, model, { token: tokens[url] }));
+    const probe = opts.probe ??
+        ((url, model) => isRelayOnly(url)
+            ? opts.relay
+                ? probeNode(opts.relay.url, model, { token: opts.relay.token, headers: { "X-Interdata-Node": relayName(url) } })
+                : Promise.resolve({ ok: false, detail: "reached only through the relay, and no https relay is configured" })
+            : probeNode(url, model, { token: tokens[url] }));
     const okCacheMs = opts.okCacheMs ?? 20_000;
     const failCacheMs = opts.failCacheMs ?? 60_000;
     const now = opts.now ?? Date.now;
     const makeClient = opts.makeClient ?? ((url) => new Ollama({ host: url, headers: authHeaders(tokens[url]), fetch: jsonErrors(fetch) }));
+    const relay = opts.relay;
+    let relayNames = {};
+    relay?.names?.then((n) => (relayNames = n), () => { });
+    const makeRelayClient = opts.makeRelayClient ??
+        ((_url, name) => new Ollama({ host: relay.url, headers: { ...authHeaders(relay.token), "X-Interdata-Node": name }, fetch: jsonErrors(fetch) }));
+    const relaySkip = new Map(); // node -> until when it's reached straight
+    const ranking = opts.ranking ?? (() => readRanking());
+    let small = [];
+    opts.small?.then((s) => (small = s), () => { });
+    let tagged = {};
+    opts.models?.then((m) => (tagged = m), () => { });
+    const asNode = (url, request) => (tagged[url] ? { ...request, model: tagged[url] } : request);
     // Node requests get the stream + malformed-tool-call handling, but no
     // same-node retries: any other failure moves on to the next route at once.
     const clients = new Map();
-    function clientFor(url) {
-        if (!clients.has(url))
-            clients.set(url, withRetries(makeClient(url), { ...opts.retry, delaysMs: [0], retryTransient: false, onRetry: undefined, server: url }).chat);
-        return clients.get(url);
+    function clientFor(url, viaRelay) {
+        const key = `${viaRelay ? "relay " : ""}${url}`;
+        if (!clients.has(key)) {
+            const c = viaRelay ? makeRelayClient(url, relayName(url, relayNames)) : makeClient(url);
+            clients.set(key, withRetries(c, { ...opts.retry, delaysMs: [0], retryTransient: false, onRetry: undefined, server: url }).chat);
+        }
+        return clients.get(key);
     }
-    /** One request on a node, counted while it runs (from `release`, if the caller already took the slot). */
+    /** One request on a node, counted while it runs (from `release`, if the caller already took the slot):
+     *  through the relay when it can take it there, else straight. */
     async function send(url, request, release = leases.acquire(url)) {
         try {
-            return await clientFor(url)(request);
+            if (isRelayOnly(url)) {
+                if (!relay)
+                    throw new Error(`${url}: reached only through the relay, and no https relay is configured`);
+                return await clientFor(url, true)(request); // no straight way to it
+            }
+            if (relay && now() >= (relaySkip.get(url) ?? 0)) {
+                try {
+                    return await clientFor(url, true)(request);
+                }
+                catch (e) {
+                    if (e instanceof Error && e.name === "AbortError")
+                        throw e; // the caller cancelled
+                    relaySkip.set(url, now() + failCacheMs); // the relay couldn't: straight, for a while
+                }
+            }
+            return await clientFor(url, false)(request);
         }
         finally {
             release();
@@ -219,27 +296,25 @@ export function withNodeRouting(hub, nodes, opts = {}) {
         }
         return undefined;
     }
-    /** The least busy direct node with a free slot that passes its checks and answers, or undefined (all full or failing). */
+    /** The strongest direct node (ranking.ts) with a free slot that passes its checks and answers, or undefined
+     *  (all full or failing). */
     async function tryDirect(request) {
         const tried = new Set();
+        const order = ranked(direct, ranking(), slots);
         for (;;) {
-            const free = direct
-                .filter((url) => !tried.has(url))
-                .map((url, i) => ({ url, i, load: leases.count(url) }))
-                .filter((n) => n.load < (slots[n.url] ?? 1))
-                .sort((a, b) => a.load - b.load || a.i - b.i);
-            if (free.length === 0)
+            const url = order.find((u) => !tried.has(u) && leases.count(u) < (slots[u] ?? 1));
+            if (url === undefined)
                 return undefined;
-            const url = free[0].url;
             tried.add(url);
             // Take the slot now, before the (async) check: requests sent together must see each other.
             const release = leases.acquire(url);
-            if (!(await usable(url, request.model))) {
+            const req = asNode(url, request); // qwen3.8 under another tag on this one
+            if (!(await usable(url, req.model))) {
                 release();
                 continue;
             }
             try {
-                return { value: await send(url, request, release) };
+                return { value: await send(url, req, release) };
             }
             catch (e) {
                 if (e instanceof Error && e.name === "AbortError")
@@ -247,6 +322,27 @@ export function withNodeRouting(hub, nodes, opts = {}) {
                 record(url, request.model, false, `request failed: ${describeError(e)}`);
             }
         }
+    }
+    /** A small job on a smaller qwen with a free slot (biggest first) that passes its checks and answers, or undefined. */
+    async function trySmall(request) {
+        for (const s of small) {
+            if (leases.count(s.url) >= (slots[s.url] ?? 1))
+                continue;
+            const release = leases.acquire(s.url);
+            if (!(await usable(s.url, s.model))) {
+                release();
+                continue;
+            }
+            try {
+                return { value: await send(s.url, { ...request, model: s.model }, release) };
+            }
+            catch (e) {
+                if (e instanceof Error && e.name === "AbortError")
+                    throw e; // the caller cancelled
+                record(s.url, s.model, false, `request failed: ${describeError(e)}`);
+            }
+        }
+        return undefined;
     }
     hub.chat = async (request) => {
         if (request?.stream || !request?.model)
@@ -258,6 +354,11 @@ export function withNodeRouting(hub, nodes, opts = {}) {
         const fromNode = await tryDirect(request);
         if (fromNode)
             return fromNode.value;
+        if (!request.tools?.length) {
+            const fromSmall = await trySmall(request); // a small job: a smaller qwen before the hub
+            if (fromSmall)
+                return fromSmall.value;
+        }
         if (nodes.lastResort.length === 0)
             return hubWithRetries(request);
         try {

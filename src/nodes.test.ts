@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadNodeConfig, parallelSlots, probeNode, withNodeRouting } from "./nodes.js";
+import { loadNodeConfig, parallelSlots, probeNode, withNodeRouting, type NodeRoutingOptions } from "./nodes.js";
 import { memoryLeases } from "./leases.js";
 
 const NODE = "https://pod-11434.proxy.runpod.net";
@@ -136,6 +136,7 @@ function setup(o: SetupOptions) {
       now: () => t,
       retry: { delaysMs: [0, 0], sleep: async () => {}, onRetry: (_a, _n, why) => retries.push(why) },
       leases: memoryLeases(),
+      ranking: () => ({}), // never ~/.eds_tui/ranking.json
     }
   );
   return { hub, direct, last, probes, changes, retries, advance: (ms: number) => (t += ms) };
@@ -222,7 +223,7 @@ test("loadNodeConfig: an entry can say how many requests it takes at once; EDS_T
 });
 
 /** Direct nodes whose replies take `ms`; records which node each request reached. */
-function parallelSetup(nodeSlots: Record<string, number>, discovered?: string[], ms = 30) {
+function parallelSetup(nodeSlots: Record<string, number>, discovered?: string[], ms = 30, extra: Partial<NodeRoutingOptions> = {}) {
   const order: string[] = [];
   const slow = (from: string) => ({
     chat: async () => {
@@ -243,22 +244,117 @@ function parallelSetup(nodeSlots: Record<string, number>, discovered?: string[],
       makeClient: (url) => slow(url) as any,
       retry: { delaysMs: [0], sleep: async () => {} },
       leases: memoryLeases(),
+      ranking: () => ({}), // never ~/.eds_tui/ranking.json
       discovered: discovered ? Promise.resolve(discovered) : undefined,
+      ...extra,
     }
   );
   const many = (n: number) =>
     Promise.all(Array.from({ length: n }, () => hub.chat({ model: "qwen3.8:latest", messages: [] }))).then((rs: any[]) =>
       rs.map((r) => r.message.content.replace("from ", ""))
     );
-  return { many, order };
+  return { many, order, hub };
 }
 
-test("routing: parallel requests go to the least busy node, not all to the first one", async () => {
+test("routing: parallel requests fill the strongest node first, then the next (nothing measured: list order)", async () => {
   const A = "http://runpod", B = "http://n98", C = "http://n3";
   const s = parallelSetup({ [A]: 3, [B]: 1, [C]: 1 });
   const got = await s.many(5);
-  assert.deepEqual(s.order, [A, B, C, A, A], "one each first, then the node with free slots");
-  assert.deepEqual([...got].sort(), [A, A, A, C, B].sort());
+  assert.deepEqual(s.order, [A, A, A, B, C]);
+  assert.deepEqual([...got].sort(), [A, A, A, B, C].sort());
+});
+
+test("routing: measured, RunPod (4 slots, 5.5s) before the spark (1 slot, 4.8s) before vps-3 (17s): Edgar's order", async () => {
+  const RP = "http://runpod", SPARK = "relay:Home", V3 = "http://100.98.75.95:11434";
+  const ranking = () => ({ [RP]: { est: 5.5, at: 1 }, [SPARK]: { est: 4.8, at: 1 }, [V3]: { est: 17, at: 1 } });
+  const s = parallelSetup({ [V3]: 1, [SPARK]: 1, [RP]: 4 }, undefined, 30, {
+    ranking,
+    relay: { url: "https://relay" },
+    makeRelayClient: (url) =>
+      ({ chat: async () => (s.order.push(url), (async function* () { yield { done: true, message: { role: "assistant", content: `from ${url}` } }; })()) }) as any,
+  });
+  await s.many(6);
+  assert.deepEqual(s.order, [RP, RP, RP, RP, SPARK, V3]);
+});
+
+test("routing: the measured strongest server leads, whatever the configured order (a new faster one takes over)", async () => {
+  const A = "http://runpod", FAST = "http://new-gpu:11434", SLOW = "http://jetson:11434";
+  const ranking = () => ({ [A]: { est: 2, at: 1 }, [FAST]: { est: 0.8, at: 1 }, [SLOW]: { est: 9, at: 1 } });
+  const s = parallelSetup({ [A]: 4, [SLOW]: 1 }, [FAST], 30, { ranking });
+  await s.many(4);
+  // FAST 1/0.8 = 1.25/s, A 4 / (2 × 2.8) = 0.71/s, SLOW 0.11/s: FAST, then A's slots.
+  assert.deepEqual(s.order, [FAST, A, A, A]);
+});
+
+test("routing: a small job goes to a smaller qwen (biggest first, under its own name) only when every node is full", async () => {
+  const A = "http://runpod";
+  const sent: Array<[string, string]> = [];
+  const small = [
+    { url: "http://pez:11434", model: "qwen3.5:9b", params: 9.7 },
+    { url: "http://openclaw:11434", model: "qwen3:4b", params: 4 },
+  ];
+  const s = parallelSetup({ [A]: 1 }, undefined, 30, {
+    small: Promise.resolve(small),
+    makeClient: (url) =>
+      ({
+        chat: async (req: any) => {
+          sent.push([url, req.model]);
+          return (async function* () {
+            await new Promise((r) => setTimeout(r, 30));
+            yield { done: true, message: { role: "assistant", content: `from ${url}` } };
+          })();
+        },
+      }) as any,
+  });
+  await new Promise((r) => setTimeout(r, 0)); // the small list resolves
+  const tools = [{ type: "function", function: { name: "run" } }];
+  const [a, small1, agentic] = await Promise.all([
+    s.hub.chat({ model: "qwen3.8:latest", messages: [] }),
+    s.hub.chat({ model: "qwen3.8:latest", messages: [] }),
+    s.hub.chat({ model: "qwen3.8:latest", messages: [], tools }),
+  ]);
+  assert.equal(a.message.content, `from ${A}`);
+  assert.equal(small1.message.content, "from http://pez:11434", "no tools: the biggest small qwen");
+  assert.deepEqual(sent.find(([u]) => u === "http://pez:11434"), ["http://pez:11434", "qwen3.5:9b"]);
+  assert.equal(agentic.message.content, "from hub", "an agentic step (tools) never goes to a small qwen");
+});
+
+test("routing: through the relay pinned to the node (its tailnet twin's name), straight when the relay can't", async () => {
+  const A = "https://pod-11434.proxy.runpod.net";
+  const pinned: string[] = [];
+  let relayWorks = true;
+  const reply = (from: string) =>
+    (async function* () {
+      yield { done: true, message: { role: "assistant", content: `from ${from}` } };
+    })();
+  const s = parallelSetup({ [A]: 2 }, undefined, 30, {
+    relay: { url: "https://relay", token: "k", names: Promise.resolve({ [A]: "http://100.65.113.6:11434" }) },
+    makeRelayClient: (_url, name) =>
+      ({
+        chat: async () => {
+          pinned.push(name);
+          if (!relayWorks) throw Object.assign(new Error("Node is not available through this relay"), { status_code: 503 });
+          return reply(`relay → ${name}`);
+        },
+      }) as any,
+    makeClient: (url) => ({ chat: async () => reply(url) }) as any,
+  });
+  await new Promise((r) => setTimeout(r, 0)); // the names resolve
+  assert.deepEqual(await s.many(1), ["relay → http://100.65.113.6:11434"]);
+  relayWorks = false;
+  assert.deepEqual(await s.many(1), [A], "the relay refused: straight, same request");
+  assert.deepEqual(await s.many(1), [A], "and straight for a while, without asking the relay again");
+  assert.equal(pinned.length, 2);
+});
+
+test("loadNodeConfig: \"router\" (the AI Command Center's) from the file or EDS_TUI_ROUTER_URL / _TOKEN", () => {
+  withTempFile(JSON.stringify({ router: { url: "http://127.0.0.1:8130/llm/", token: " t " } }), (path) => {
+    assert.deepEqual(loadNodeConfig({}, path).router, { url: "http://127.0.0.1:8130/llm", token: "t" });
+    assert.deepEqual(loadNodeConfig({ EDS_TUI_ROUTER_URL: "http://other:8130/llm", EDS_TUI_ROUTER_TOKEN: "" }, path).router, {
+      url: "http://other:8130/llm",
+    });
+  });
+  withTempFile(JSON.stringify({ router: { url: "not a url" } }), (path) => assert.equal(loadNodeConfig({}, path).router, undefined));
 });
 
 test("routing: when every node's slots are full, the rest go to the hub instead of waiting", async () => {
@@ -273,4 +369,25 @@ test("routing: servers found on the network join the direct nodes with one slot 
   const A = "http://runpod", FOUND = "http://100.98.75.95:11434";
   const s = parallelSetup({ [A]: 1 }, [FOUND]);
   assert.deepEqual((await s.many(3)).sort(), [A, FOUND, "hub"].sort());
+});
+
+test("a relay-only node ({\"relay\": \"Home\"}): parsed, checked and sent through the relay pinned to it, never straight", async () => {
+  withTempFile(JSON.stringify({ nodes: [{ url: NODE, slots: 4 }, { relay: "Home", slots: 1 }, "relay:", { relay: " " }] }), (path) => {
+    const cfg = loadNodeConfig({}, path);
+    assert.deepEqual(cfg.direct, [NODE, "relay:Home"]);
+    assert.deepEqual(cfg.slots, { [NODE]: 4, "relay:Home": 1 });
+  });
+  const pinned: string[] = [];
+  const straight: string[] = [];
+  const reply = (from: string) =>
+    (async function* () {
+      yield { done: true, message: { role: "assistant", content: `from ${from}` } };
+    })();
+  const s = parallelSetup({ "relay:Home": 1 }, undefined, 30, {
+    relay: { url: "https://relay", token: "k" },
+    makeRelayClient: (_url, name) => ({ chat: async () => (pinned.push(name), reply(`relay → ${name}`)) }) as any,
+    makeClient: (url) => ({ chat: async () => (straight.push(url), reply(url)) }) as any,
+  });
+  assert.deepEqual(await s.many(1), ["relay → Home"]);
+  assert.deepEqual([pinned, straight], [["Home"], []]);
 });
