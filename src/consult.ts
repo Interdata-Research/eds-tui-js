@@ -18,7 +18,7 @@ import type { Ollama, Message } from "ollama";
 import { describeError } from "./retry.js";
 import { isStopped } from "./abort.js";
 import { runCommand } from "./exec.js";
-import { SHELL_TOOLS } from "./tools.js";
+import { RUN_COMMAND_TOOL } from "./tools.js";
 import { FINAL_ANSWER_NUDGE, type ConsultSpecialistFn } from "./agent.js";
 import { pickSpecialistModel, type PoolEntry } from "./model-pool.js";
 import * as ui from "./ui.js";
@@ -81,7 +81,7 @@ export function makeConsultSpecialist(
       let response;
       try {
         response = await ui.withSpinner(`${CONSULT_INDENT}${ui.displayModel(specialist)} working...`, () =>
-          client.chat({ model: specialist, messages, tools: SHELL_TOOLS })
+          client.chat({ model: specialist, messages, tools: [RUN_COMMAND_TOOL] }) // shell only: a specialist may not see images
         );
       } catch (e) {
         if (isStopped(e)) throw e;

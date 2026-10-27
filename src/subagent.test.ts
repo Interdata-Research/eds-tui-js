@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Ollama, Message } from "ollama";
 import { makeDelegateTask, SUBAGENT_MAX_TURNS } from "./subagent.js";
+import { twoColorPng } from "./vision.js";
 
 const SMALL = "small-model";
 const CWD = tmpdir();
@@ -112,4 +113,37 @@ test("exhausting SUBAGENT_MAX_TURNS with the salvage call ALSO failing returns t
   const result = await delegate(client, "keep going forever");
 
   assert.match(result!, new RegExp(`hit its ${SUBAGENT_MAX_TURNS}-step limit without a conclusive`));
+});
+
+test("view_image: the sub-agent sees the picture in its next request, after the round's tool results", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "eds-tui-subagent-image-"));
+  try {
+    writeFileSync(join(dir, "s.png"), twoColorPng([255, 0, 0], [0, 0, 255]));
+    const requests: any[] = [];
+    const client = {
+      chat: async (req: any) => {
+        requests.push(structuredClone(req));
+        if (requests.length > 1) return finalResponse("red and blue");
+        return {
+          message: {
+            role: "assistant",
+            content: "",
+            tool_calls: [
+              { function: { name: "view_image", arguments: { path: "s.png" } } },
+              { function: { name: "run_command", arguments: { command: "echo listed" } } },
+            ],
+          } as Message,
+        };
+      },
+    } as unknown as Ollama;
+    const result = await makeDelegateTask(SMALL, dir, APP_DIR)(client, "what colors is s.png?");
+    assert.equal(result, "red and blue");
+    assert.ok(requests[0].tools.some((t: any) => t.function.name === "view_image"));
+    const sent: Message[] = requests[1].messages;
+    assert.deepEqual(sent.slice(-3).map((m) => m.role), ["tool", "tool", "user"]);
+    assert.match(sent[sent.length - 3]!.content, /Loaded .*s\.png/);
+    assert.equal(sent[sent.length - 1]!.images?.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

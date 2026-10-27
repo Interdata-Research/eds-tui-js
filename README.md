@@ -485,6 +485,25 @@ tier-3 escalation and a real `consult_specialist` call if
 build a throwaway fixture in a temp directory — they never touch your real
 `~/.eds_tui/skills`.
 
+## Images
+
+qwen3.8 sees images, and so does `ask`:
+
+- An image path you type (`what's in ~/Pictures/wall.jpg?`, quoted or with `\ ` for
+  spaces) is attached to your message, up to 4 per message.
+- The model (and a delegated sub-agent) can open any image itself with the
+  `view_image` tool: `look at the wallpapers in ~/Pictures and pick the darkest one`.
+- Images are shrunk to 1280px on their longest side first (ImageMagick or ffmpeg,
+  whichever is installed; without either, JPEG and PNG go as they are), and only the
+  newest 6 stay attached to the conversation.
+- A request with images goes only to a server that has shown it really sees them: a
+  server can list "vision" and still drop every image (the RunPod pod runs llama.cpp
+  without its vision projector, and invents a picture). Each server is shown a
+  two-color picture once and must name both colors; the verdict is kept in
+  `~/.eds_tui/vision.json` (a week for "sees", a day for "can't"), and `ask --nodes`
+  shows it. With the AI Command Center's router, image requests skip the router and
+  use this check. No server that sees means an error saying so, never a made-up answer.
+
 ## Conversation history
 
 By default, every run of `ask` starts a completely fresh conversation. Use

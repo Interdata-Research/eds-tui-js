@@ -29,12 +29,14 @@ import {
   LOAD_SKILL_TOOL,
   CREATE_SKILL_TOOL,
   CONSULT_SPECIALIST_TOOL,
+  VIEW_IMAGE_TOOL,
   SHELL_TOOLS,
 } from "./tools.js";
 import { maybeCompact } from "./compaction.js";
 import type { RunStats } from "./types.js";
 import * as ui from "./ui.js";
 import { pickSpecialistModel, type PoolEntry } from "./model-pool.js";
+import { keepRecentImages, viewImage, viewedImagesMessage, type LoadedImage } from "./vision.js";
 
 export const SMALL_MAX_TURNS = 6; // tool-call rounds before escalating off the small model
 export const HARD_MAX_TURNS = 40; // absolute ceiling, prevents a runaway loop
@@ -71,7 +73,7 @@ export function toolsFor(activeModel: string, mainModel: string, smallModel: str
   // When no separate small model is configured, small === main and the main
   // model must keep its full tool set.
   if (activeModel === smallModel && smallModel !== mainModel) return SHELL_TOOLS;
-  const tools: Tool[] = [RUN_COMMAND_TOOL, DELEGATE_TOOL, DELEGATE_TASKS_TOOL, CREATE_SKILL_TOOL];
+  const tools: Tool[] = [RUN_COMMAND_TOOL, VIEW_IMAGE_TOOL, DELEGATE_TOOL, DELEGATE_TASKS_TOOL, CREATE_SKILL_TOOL];
   // Gated the same way LOAD_SKILL_TOOL is gated on skills.discover().size > 0
   // — no point offering a tool that can only ever reply "no pool configured".
   if (hasSpecialistPool) tools.push(CONSULT_SPECIALIST_TOOL);
@@ -298,7 +300,7 @@ export async function agenticLoop(
     const pool = deps.modelPool ?? [];
     if (pool.length === 0) return false;
 
-    const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
+    const lastUserMessage = [...messages].reverse().find((m) => m.role === "user" && !m.content.startsWith("[view_image]"));
     const specialist = await pickSpecialistModel(deps.client, lastUserMessage?.content ?? "", pool, deps.smallModel);
     if (!specialist || specialist === deps.mainModel) return false;
 
@@ -351,6 +353,7 @@ export async function agenticLoop(
     if (await maybeCompact(deps.client, deps.smallModel, messages)) {
       stats.compactions = (stats.compactions ?? 0) + 1;
     }
+    keepRecentImages(messages); // every request resends them
 
     let response;
     try {
@@ -396,6 +399,7 @@ export async function agenticLoop(
 
     if (msg.tool_calls && msg.tool_calls.length > 0) {
       ui.printRunningTools();
+      const viewed: LoadedImage[] = [];
       for (const tc of msg.tool_calls) {
         throwIfStopped();
         const args = tc.function.arguments ?? {};
@@ -416,6 +420,10 @@ export async function agenticLoop(
         } else if (tc.function.name === "create_skill") {
           stats.skillsCreated = (stats.skillsCreated ?? 0) + 1;
           output = createSkill(args);
+        } else if (tc.function.name === "view_image") {
+          const r = await viewImage(args.path, deps.cwd);
+          if (r.image) viewed.push(r.image);
+          output = r.output;
         } else {
           stats.commands = (stats.commands ?? 0) + 1;
           output = await runCommandOnce(args.command ?? "", deps.cwd, seen);
@@ -431,6 +439,8 @@ export async function agenticLoop(
       if (left > 0 && left <= 2 && lastMessage?.role === "tool") {
         lastMessage.content += "\n\n" + WRAP_UP_NUDGE(left);
       }
+      // After every result of the round (a tool result doesn't carry an image on every server).
+      if (viewed.length > 0) messages.push(viewedImagesMessage(viewed));
     } else {
       await ui.renderAnswer(msg.content);
       deps.saveHistory(messages);

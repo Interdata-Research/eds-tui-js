@@ -31,6 +31,7 @@ import * as skills from "./skills.js";
 import * as ui from "./ui.js";
 import { promptLine } from "./input.js";
 import { selfUpgrade, githubUpgrade } from "./upgrade.js";
+import { attachedNote, findImagePaths, hasImages, knownVision, loadImage, withoutImages } from "./vision.js";
 import type { RunStats, Skill } from "./types.js";
 
 // Where this running copy's source actually lives, regardless of the
@@ -58,7 +59,8 @@ function normalizeForHistory(messages: Message[]): unknown[] {
   return messages
     .filter((m) => m.role !== "system")
     .map((m) => {
-      const out: Record<string, unknown> = { role: m.role, content: m.content ?? "" };
+      // Images aren't saved (they'd make the file huge); the message says one was there.
+      const out: Record<string, unknown> = { role: m.role, content: withoutImages(m) };
       if (m.tool_calls && m.tool_calls.length > 0) {
         out.tool_calls = m.tool_calls.map((tc) => ({
           function: { name: tc.function.name, arguments: tc.function.arguments },
@@ -137,6 +139,23 @@ function extractSkill(userInput: string): { request: string; skill: Skill | null
   return { request: rest.trim() || `Run the ${skill.name} skill.`, skill };
 }
 
+/** The user's message, with the image files it names loaded to go with it (vision.ts) and a line saying so. */
+async function userMessage(request: string): Promise<Message> {
+  const images: string[] = [];
+  const paths: string[] = [];
+  for (const path of findImagePaths(request, process.cwd())) {
+    try {
+      const image = await loadImage(path, process.cwd());
+      ui.printViewImage(image.path, { note: image.note });
+      images.push(image.data);
+      paths.push(image.path);
+    } catch (e) {
+      ui.printViewImage(path, { error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  return images.length ? { role: "user", content: request + attachedNote(paths), images } : { role: "user", content: request };
+}
+
 const NOTHING_FOUND: Discovered = { urls: [], duplicates: {}, small: [] };
 
 /** More qwen3.8 servers and smaller qwens on the network (discover.ts), unless the configuration turns that off. */
@@ -213,7 +232,9 @@ async function printNodes(model: string): Promise<void> {
     const state = m
       ? chalk.green(`benchmark ${m.est.toFixed(1)}s, ${strength(m, cfg.slots?.[url] ?? 1).toFixed(2)} requests/s with every slot busy`)
       : chalk.red("didn't answer the benchmark");
-    console.log(`  ${i + 1}. ${url}  ${chalk.dim(`${why(url)}, ${cfg.slots?.[url] ?? 1} at a time, ${leases.count(url)} running now`)}  ${state}`);
+    const sees = knownVision(url, found.models?.[url] ?? model);
+    const eyes = sees === undefined ? "" : sees ? chalk.green("  sees images") : chalk.yellow("  can't see images (gets none)");
+    console.log(`  ${i + 1}. ${url}  ${chalk.dim(`${why(url)}, ${cfg.slots?.[url] ?? 1} at a time, ${leases.count(url)} running now`)}  ${state}${eyes}`);
   });
   for (const s of found.small) console.log(`  ·  ${s.url}  ${chalk.dim(`${s.model} (${s.params}B): small jobs when every ${model} server is busy`)}`);
   for (const s of found.idle ?? []) console.log(`  ·  ${s.url}  ${chalk.dim(`has ${s.model}, not loaded: not used (never made to load it)`)}`);
@@ -314,25 +335,15 @@ async function main(): Promise<void> {
   const nodeConfig = loadNodeConfig(process.env);
   const relay = relayFor(process.env);
   let discovered: Promise<string[]> | undefined;
-  if (nodeConfig.router && !process.env.EDS_TUI_URL && (await routerUp(nodeConfig.router))) {
-    // The AI Command Center's router on this machine ranks and spreads every request of every ask and task here
-    // (strongest qwen first, through the relay); the relay itself is the last resort if the router fails.
-    const r = nodeConfig.router;
-    client = new Ollama({ host: r.url, headers: r.token ? { Authorization: `Bearer ${r.token}` } : {}, fetch: jsonErrors(fetch) });
-    mainModel = main;
-    smallModel = small;
-    withNodeRouting(
-      client,
-      { direct: [], lastResort: relay ? [relay.url] : [], tokens: relay?.token ? { [relay.url]: relay.token } : {} },
-      { retry: { onRetry: ui.printRetrying } }
-    );
-  } else {
-    const discovery = discoveryFor(nodeConfig, mainModel); // runs while the user types
-    discovered = discovery?.then((d) => d.urls);
+
+  /** ask's own routing (nodes.ts) on `c`: the configured and found servers, strongest first. */
+  const routeItself = (c: Ollama, model: string): Promise<string[]> | undefined => {
+    const discovery = discoveryFor(nodeConfig, model); // runs while the user types
     const names = (discovery ?? Promise.resolve(NOTHING_FOUND)).then(relayNames);
-    withNodeRouting(client, nodeConfig, {
+    const urls = discovery?.then((d) => d.urls);
+    withNodeRouting(c, nodeConfig, {
       retry: { onRetry: ui.printRetrying },
-      discovered,
+      discovered: urls,
       small: discovery?.then((d) => d.small),
       models: discovery?.then((d) => d.models ?? {}),
       relay: relay ? { ...relay, names } : undefined,
@@ -341,11 +352,41 @@ async function main(): Promise<void> {
     void (discovery ?? Promise.resolve(NOTHING_FOUND))
       .then(async (d) =>
         refreshRanking({
-          urls: [...nodeConfig.direct, ...d.urls], model: mainModel, modelFor: (u) => d.models?.[u],
+          urls: [...nodeConfig.direct, ...d.urls], model, modelFor: (u) => d.models?.[u],
           routesFor: routesFor(nodeConfig, relay, relayNames(d)), leases: fileLeases(),
         })
       )
       .catch(() => {});
+    return urls;
+  };
+
+  if (nodeConfig.router && !process.env.EDS_TUI_URL && (await routerUp(nodeConfig.router))) {
+    // The AI Command Center's router on this machine ranks and spreads every request of every ask and task here
+    // (strongest qwen first, through the relay); the relay itself is the last resort if the router fails.
+    const r = nodeConfig.router;
+    const own = client;
+    client = new Ollama({ host: r.url, headers: r.token ? { Authorization: `Bearer ${r.token}` } : {}, fetch: jsonErrors(fetch) });
+    mainModel = main;
+    smallModel = small;
+    withNodeRouting(
+      client,
+      { direct: [], lastResort: relay ? [relay.url] : [], tokens: relay?.token ? { [relay.url]: relay.token } : {} },
+      { retry: { onRetry: ui.printRetrying } }
+    );
+    // Except a request with images: the router can't tell which servers drop them (RunPod), so ask picks one that
+    // has shown it sees them, by itself (nodes.ts). Set up the first time one comes.
+    const viaRouter = client.chat.bind(client) as (req: any) => Promise<any>;
+    let seeing = false;
+    (client as any).chat = (req: any) => {
+      if (!hasImages(req)) return viaRouter(req);
+      if (!seeing) {
+        routeItself(own, main);
+        seeing = true;
+      }
+      return (own.chat as (req: any) => Promise<any>)(req);
+    };
+  } else {
+    discovered = routeItself(client, mainModel);
   }
 
   stoppableChat(client); // Esc in the interactive session ends any model call at once (abort.ts)
@@ -434,7 +475,7 @@ async function main(): Promise<void> {
         parallelSlots: slotsNow,
       }),
     };
-    messages.push({ role: "user", content: request });
+    messages.push(await userMessage(request));
 
     const stats: Partial<RunStats> = {};
     await agenticLoop(deps, messages, active, stats);

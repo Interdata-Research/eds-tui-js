@@ -189,6 +189,14 @@ export function printCommandError(message: string, indent = "  "): void {
   console.log();
 }
 
+/** A view_image call (or an image a message attached): the file, then what came of it. */
+export function printViewImage(path: string, outcome: { note?: string; error?: string }, indent = "  "): void {
+  console.log(`${indent}${chalk.bold.magenta("◉")} ${chalk.bold.white(path)}`);
+  if (outcome.error) console.log(chalk.red(`${indent}Error: ${outcome.error}`));
+  else console.log(chalk.dim(`${indent}attached for the model to see (${outcome.note})`));
+  console.log();
+}
+
 /** Main-loop-only: the cached-repeat note, WITH a command echo. Subagent's own cache hit deliberately prints nothing at all (see subagent.ts) — do not reuse this there. */
 export function printCachedNote(command: string): void {
   printCommand(command);

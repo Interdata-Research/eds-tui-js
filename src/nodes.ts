@@ -47,6 +47,12 @@
 // minute. A node's name on the relay is its address there (discover.ts gives
 // a configured proxy URL's tailnet twin).
 //
+// Images (vision.ts, 0.10.0): a request carrying images goes only to a node
+// that has shown it really sees them — free ones first, strongest first —
+// never to the hub or a smaller qwen, which may hand it to one that drops the
+// images (RunPod's llama.cpp) and invents the picture. None that sees: an
+// error saying so, rather than a made-up answer.
+//
 // On a machine with the AI Command Center, `"router": {"url", "token"}` in
 // nodes.json (or EDS_TUI_ROUTER_URL / EDS_TUI_ROUTER_TOKEN) sends everything
 // to its router instead (cli.ts), which does all of the above for every ask
@@ -61,6 +67,7 @@ import { describeError, withRetries, type RetryOptions } from "./retry.js";
 import { fileLeases, type Leases } from "./leases.js";
 import { ranked, readRanking, type Ranking } from "./ranking.js";
 import type { SmallServer } from "./discover.js";
+import { hasImages, knownVision, probeVision, rememberVision } from "./vision.js";
 
 export const NODES_FILE = join(homedir(), ".eds_tui", "nodes.json");
 
@@ -231,6 +238,8 @@ export interface NodeRoutingOptions {
   relay?: { url: string; token?: string; names?: Promise<Record<string, string>> };
   /** Build the client that reaches `url` through the relay (tests). */
   makeRelayClient?: (url: string, name: string) => Ollama;
+  /** Does a server see images (vision.ts probeVision; ok null = couldn't tell)? Verdicts are kept in vision.json. */
+  visionProbe?: (url: string, model: string) => Promise<{ ok: boolean | null; detail: string }>;
 }
 
 /** A node's name on the relay: a relay-only node's own name, its tailnet twin (a configured proxy URL), else its address. */
@@ -408,12 +417,66 @@ export function withNodeRouting(hub: Ollama, nodes: NodeConfig, opts: NodeRoutin
     return undefined;
   }
 
+  const visionProbe =
+    opts.visionProbe ??
+    ((url, model) =>
+      isRelayOnly(url)
+        ? relay
+          ? probeVision(relay.url, model, { token: relay.token, headers: { "X-Interdata-Node": relayName(url, relayNames) } })
+          : Promise.resolve({ ok: false, detail: "reached only through the relay, and no https relay is configured" })
+        : probeVision(url, model, { token: tokens[url] }));
+
+  const unsure = new Map<string, number>(); // url + model -> until when a server that couldn't tell is left alone
+
+  /** Has this server shown it sees images? Asked once, then remembered for every ask on this machine (vision.ts).
+   *  One that couldn't tell (out of memory for the picture, down) is asked again after failCacheMs. */
+  async function sees(url: string, model: string): Promise<boolean> {
+    const known = knownVision(url, model);
+    if (known !== undefined) return known;
+    if (now() < (unsure.get(`${url} ${model}`) ?? 0)) return false;
+    const { ok, detail } = await visionProbe(url, model);
+    if (ok !== null) rememberVision(url, model, ok, detail);
+    else unsure.set(`${url} ${model}`, now() + failCacheMs);
+    return ok === true;
+  }
+
+  /** A request with images: the strongest node that sees them, free ones first (a busy one queues it). Never the hub
+   *  or a smaller qwen: they may hand it to a server that drops the images and makes the picture up. */
+  async function trySeeing(request: any): Promise<any> {
+    const order = ranked([...new Set([...direct, ...nodes.lastResort])], ranking(), slots);
+    const free = order.filter((u) => leases.count(u) < (slots[u] ?? 1));
+    const why: string[] = [];
+    for (const url of [...free, ...order.filter((u) => !free.includes(u))]) {
+      const req = asNode(url, request);
+      if (!(await sees(url, req.model))) {
+        why.push(`${url} can't see images`);
+        continue;
+      }
+      // A node busy with our own requests would fail the quick check; it takes this one after them.
+      if (free.includes(url) && !(await usable(url, req.model))) {
+        why.push(`${url} isn't answering`);
+        continue;
+      }
+      try {
+        return await send(url, req);
+      } catch (e) {
+        if (e instanceof Error && e.name === "AbortError") throw e; // the caller cancelled
+        record(url, request.model, false, `request failed: ${describeError(e)}`);
+        why.push(`${url}: ${describeError(e)}`);
+      }
+    }
+    throw new Error(
+      `no ${request.model} server here can look at images right now (${why.join("; ") || "no servers configured or found"})`
+    );
+  }
+
   (hub as any).chat = async (request: any) => {
     if (request?.stream || !request?.model) return rawHubChat(request);
     if (discovering) {
       await discovering;
       discovering = undefined;
     }
+    if (hasImages(request)) return trySeeing(request);
 
     const fromNode = await tryDirect(request);
     if (fromNode) return fromNode.value;

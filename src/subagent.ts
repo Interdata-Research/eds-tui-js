@@ -20,6 +20,7 @@ import { describeError } from "./retry.js";
 import { isStopped } from "./abort.js";
 import { runCommand } from "./exec.js";
 import { SHELL_TOOLS } from "./tools.js";
+import { keepRecentImages, viewImage, viewedImagesMessage, type LoadedImage } from "./vision.js";
 import { FINAL_ANSWER_NUDGE, type DelegateTaskFn } from "./agent.js";
 import * as ui from "./ui.js";
 
@@ -37,6 +38,8 @@ export function buildSubagentPrompt(cwd: string, appDir: string): string {
     "point) — read it if the subtask is about how 'ask' itself behaves, rather than " +
     "guessing from the working directory. " +
     "You have been handed one specific subtask. Use the run_command tool to complete it, " +
+    "and view_image to look at an image file yourself (you can see images; never run " +
+    "another model to look at one for you), " +
     "then report what you found plainly and concisely. " +
     "You are working autonomously — nobody can answer questions, so do not ask any. " +
     "Suppress permission errors with '2>/dev/null'."
@@ -76,10 +79,15 @@ export function makeDelegateTask(smallModel: string, cwd: string, appDir: string
       messages.push(msg);
 
       if (msg.tool_calls && msg.tool_calls.length > 0) {
+        const viewed: LoadedImage[] = [];
         for (const tc of msg.tool_calls) {
           const command = String(tc.function.arguments?.command ?? "").trim();
           let output: string;
-          if (seen.has(command)) {
+          if (tc.function.name === "view_image") {
+            const r = await viewImage(tc.function.arguments?.path, cwd, SUB_INDENT);
+            if (r.image) viewed.push(r.image);
+            output = r.output;
+          } else if (seen.has(command)) {
             output =
               `Already run in this subtask, output was:\n${seen.get(command)}\n\n` +
               "Try something different or report what you have.";
@@ -89,6 +97,8 @@ export function makeDelegateTask(smallModel: string, cwd: string, appDir: string
           }
           messages.push({ role: "tool", content: output });
         }
+        if (viewed.length > 0) messages.push(viewedImagesMessage(viewed));
+        keepRecentImages(messages);
       } else {
         const result = (msg.content ?? "").trim() || "(no result)";
         const lines = result.split("\n");

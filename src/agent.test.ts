@@ -376,11 +376,11 @@ test("consult_specialist dispatches to deps.consultSpecialist and increments sta
   assert.ok(toolResults.some((c) => c.includes("here is the regex")));
 });
 
-test("toolsFor: the small model always gets shell-only tools, regardless of skills installed or a pool being configured", () => {
+test("toolsFor: the small model always gets shell-only tools (and its eyes), regardless of skills installed or a pool being configured", () => {
   const tools = toolsFor(SMALL, MAIN, SMALL, true);
   assert.deepEqual(
     tools.map((t) => t.function.name),
-    ["run_command"]
+    ["run_command", "view_image"]
   );
 });
 
@@ -390,7 +390,7 @@ test("toolsFor: the main model gets the full set, minus load_skill when no skill
   skills.setSkillsDir(tmp);
   try {
     const names = toolsFor(MAIN, MAIN, SMALL, false).map((t) => t.function.name);
-    assert.deepEqual(names, ["run_command", "delegate_task", "delegate_tasks", "create_skill"]);
+    assert.deepEqual(names, ["run_command", "view_image", "delegate_task", "delegate_tasks", "create_skill"]);
   } finally {
     skills.setSkillsDir(realDir);
     rmSync(tmp, { recursive: true, force: true });
@@ -407,7 +407,7 @@ test("toolsFor: the main model gets load_skill added once at least one skill exi
     skills.resetCache();
 
     const names = toolsFor(MAIN, MAIN, SMALL, false).map((t) => t.function.name);
-    assert.deepEqual(names, ["run_command", "delegate_task", "delegate_tasks", "create_skill", "load_skill"]);
+    assert.deepEqual(names, ["run_command", "view_image", "delegate_task", "delegate_tasks", "create_skill", "load_skill"]);
   } finally {
     skills.setSkillsDir(realDir);
     rmSync(tmp, { recursive: true, force: true });
@@ -422,7 +422,7 @@ test("toolsFor: a third (specialist) model that is neither main nor small also g
     const tools = toolsFor("some-specialist-model:8b", MAIN, SMALL, false);
     assert.deepEqual(
       tools.map((t) => t.function.name),
-      ["run_command", "delegate_task", "delegate_tasks", "create_skill"]
+      ["run_command", "view_image", "delegate_task", "delegate_tasks", "create_skill"]
     );
   } finally {
     skills.setSkillsDir(realDir);
@@ -437,6 +437,7 @@ test("toolsFor: consult_specialist is added for the main model (and a third spec
   try {
     assert.deepEqual(toolsFor(MAIN, MAIN, SMALL, true).map((t) => t.function.name), [
       "run_command",
+      "view_image",
       "delegate_task",
       "delegate_tasks",
       "create_skill",
@@ -444,6 +445,7 @@ test("toolsFor: consult_specialist is added for the main model (and a third spec
     ]);
     assert.deepEqual(toolsFor("some-specialist-model:8b", MAIN, SMALL, true).map((t) => t.function.name), [
       "run_command",
+      "view_image",
       "delegate_task",
       "delegate_tasks",
       "create_skill",

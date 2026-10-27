@@ -176,6 +176,27 @@ export const CONSULT_SPECIALIST_TOOL = {
         },
     },
 };
-// Sub-agent and small model: shell only. Mirrors SHELL_TOOLS in main.py.
-export const SHELL_TOOLS = [RUN_COMMAND_TOOL];
+export const VIEW_IMAGE_TOOL = {
+    type: "function",
+    function: {
+        name: "view_image",
+        description: "Look at an image file yourself: you can see images. The picture is attached to the " +
+            "conversation right after this call, for you to describe, read or judge. Use it " +
+            "whenever a request is about what an image shows — never run another model (such as " +
+            "'ollama run ...') to look at it for you. One image per call; call it several times in " +
+            "one round to see several. JPEG, PNG, WebP, GIF, BMP and more.",
+        parameters: {
+            type: "object",
+            properties: {
+                path: {
+                    type: "string",
+                    description: "The image file's path: absolute, ~/..., or relative to the working directory",
+                },
+            },
+            required: ["path"],
+        },
+    },
+};
+// Sub-agent and small model: shell, and their eyes. Mirrors SHELL_TOOLS in main.py (plus view_image).
+export const SHELL_TOOLS = [RUN_COMMAND_TOOL, VIEW_IMAGE_TOOL];
 //# sourceMappingURL=tools.js.map

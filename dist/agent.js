@@ -20,10 +20,11 @@ import { describeError } from "./retry.js";
 import { isStopped, throwIfStopped } from "./abort.js";
 import * as skills from "./skills.js";
 import { runCommandOnce } from "./exec.js";
-import { RUN_COMMAND_TOOL, DELEGATE_TOOL, DELEGATE_TASKS_TOOL, LOAD_SKILL_TOOL, CREATE_SKILL_TOOL, CONSULT_SPECIALIST_TOOL, SHELL_TOOLS, } from "./tools.js";
+import { RUN_COMMAND_TOOL, DELEGATE_TOOL, DELEGATE_TASKS_TOOL, LOAD_SKILL_TOOL, CREATE_SKILL_TOOL, CONSULT_SPECIALIST_TOOL, VIEW_IMAGE_TOOL, SHELL_TOOLS, } from "./tools.js";
 import { maybeCompact } from "./compaction.js";
 import * as ui from "./ui.js";
 import { pickSpecialistModel } from "./model-pool.js";
+import { keepRecentImages, viewImage, viewedImagesMessage } from "./vision.js";
 export const SMALL_MAX_TURNS = 6; // tool-call rounds before escalating off the small model
 export const HARD_MAX_TURNS = 40; // absolute ceiling, prevents a runaway loop
 const WRAP_UP_NUDGE = (left) => `SYSTEM NOTE: you have ${left} tool-call round(s) left before you are cut off. ` +
@@ -55,7 +56,7 @@ export function toolsFor(activeModel, mainModel, smallModel, hasSpecialistPool) 
     // model must keep its full tool set.
     if (activeModel === smallModel && smallModel !== mainModel)
         return SHELL_TOOLS;
-    const tools = [RUN_COMMAND_TOOL, DELEGATE_TOOL, DELEGATE_TASKS_TOOL, CREATE_SKILL_TOOL];
+    const tools = [RUN_COMMAND_TOOL, VIEW_IMAGE_TOOL, DELEGATE_TOOL, DELEGATE_TASKS_TOOL, CREATE_SKILL_TOOL];
     // Gated the same way LOAD_SKILL_TOOL is gated on skills.discover().size > 0
     // — no point offering a tool that can only ever reply "no pool configured".
     if (hasSpecialistPool)
@@ -205,7 +206,7 @@ export async function agenticLoop(deps, messages, initialActiveModel, stats = {}
         const pool = deps.modelPool ?? [];
         if (pool.length === 0)
             return false;
-        const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
+        const lastUserMessage = [...messages].reverse().find((m) => m.role === "user" && !m.content.startsWith("[view_image]"));
         const specialist = await pickSpecialistModel(deps.client, lastUserMessage?.content ?? "", pool, deps.smallModel);
         if (!specialist || specialist === deps.mainModel)
             return false;
@@ -254,6 +255,7 @@ export async function agenticLoop(deps, messages, initialActiveModel, stats = {}
         if (await maybeCompact(deps.client, deps.smallModel, messages)) {
             stats.compactions = (stats.compactions ?? 0) + 1;
         }
+        keepRecentImages(messages); // every request resends them
         let response;
         try {
             response = await ui.withSpinner("Thinking...", () => deps.client.chat({
@@ -296,6 +298,7 @@ export async function agenticLoop(deps, messages, initialActiveModel, stats = {}
         messages.push(msg);
         if (msg.tool_calls && msg.tool_calls.length > 0) {
             ui.printRunningTools();
+            const viewed = [];
             for (const tc of msg.tool_calls) {
                 throwIfStopped();
                 const args = tc.function.arguments ?? {};
@@ -321,6 +324,12 @@ export async function agenticLoop(deps, messages, initialActiveModel, stats = {}
                     stats.skillsCreated = (stats.skillsCreated ?? 0) + 1;
                     output = createSkill(args);
                 }
+                else if (tc.function.name === "view_image") {
+                    const r = await viewImage(args.path, deps.cwd);
+                    if (r.image)
+                        viewed.push(r.image);
+                    output = r.output;
+                }
                 else {
                     stats.commands = (stats.commands ?? 0) + 1;
                     output = await runCommandOnce(args.command ?? "", deps.cwd, seen);
@@ -335,6 +344,9 @@ export async function agenticLoop(deps, messages, initialActiveModel, stats = {}
             if (left > 0 && left <= 2 && lastMessage?.role === "tool") {
                 lastMessage.content += "\n\n" + WRAP_UP_NUDGE(left);
             }
+            // After every result of the round (a tool result doesn't carry an image on every server).
+            if (viewed.length > 0)
+                messages.push(viewedImagesMessage(viewed));
         }
         else {
             await ui.renderAnswer(msg.content);

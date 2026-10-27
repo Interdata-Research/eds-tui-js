@@ -28,6 +28,10 @@ export function buildSystemPrompt(opts) {
         "working directory: they may be unrelated programs, or stale copies that are not " +
         "what is running. " +
         "You have access to the user's terminal via the run_command tool. " +
+        "You can also see images: to look at an image file, call view_image with its path " +
+        "(several calls in one round for several images) and judge the picture yourself. Never " +
+        "run another model (such as 'ollama run ...') to look at an image for you. An image " +
+        "path the user types is attached to their message automatically. " +
         "Search strategy: " +
         "- Use 'find' to locate files or directories by name. " +
         "- Use 'grep -r' to search inside file contents when looking for text, keywords, or strings. " +
