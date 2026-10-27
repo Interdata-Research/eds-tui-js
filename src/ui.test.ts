@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { marked } from "marked";
-import { displayModel, deindentOverIndentedLists } from "./ui.js";
+import { displayModel, deindentOverIndentedLists, spinnerFits } from "./ui.js";
 
 test("displayModel: strips a trailing :cloud tag", () => {
   assert.equal(displayModel("deepseek-v4-pro:cloud"), "deepseek-v4-pro");
@@ -66,4 +66,11 @@ test("deindentOverIndentedLists: leaves ordinary prose and headings completely a
 test("deindentOverIndentedLists: handles multiple separate over-indented list blocks in one document independently", () => {
   const doc = "## A\n\n    * a1\n    * a2\n\n## B\n\n    * b1\n";
   assert.equal(deindentOverIndentedLists(doc), "## A\n\n* a1\n* a2\n\n## B\n\n* b1\n");
+});
+
+test("spinnerFits: a terminal reporting no width gets no animated spinner (ora would loop forever in clear())", () => {
+  assert.equal(spinnerFits({ isTTY: true, columns: 0 }), false);
+  assert.equal(spinnerFits({ isTTY: true }), false);
+  assert.equal(spinnerFits({ isTTY: true, columns: 120 }), true);
+  assert.equal(spinnerFits({ isTTY: false }), true); // ora already leaves non-terminals alone
 });

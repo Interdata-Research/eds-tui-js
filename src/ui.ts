@@ -53,6 +53,17 @@ export function setStatusSink(sink: StatusSink | null): void {
   statusSink = sink;
 }
 
+/**
+ * Whether ora can draw on this stream. A terminal that reports no width (a pty
+ * nobody sized: `script`, `docker exec -t`, some CI) gives columns 0, and ora
+ * then counts Infinity lines to clear and loops forever in clear(), so the
+ * process hangs on its first spinner ("Routing...") with the reply already in.
+ * Such a terminal gets ora's plain one-line fallback instead.
+ */
+export function spinnerFits(stream: { isTTY?: boolean; columns?: number }): boolean {
+  return !stream.isTTY || (stream.columns ?? 0) > 0;
+}
+
 /** Run fn() while a spinner shows `text`; the spinner is always stopped before fn's result is used, so callers never race it with their own output. Esc (abort.ts) ends the wait at once. */
 export async function withSpinner<T>(text: string, fn: () => Promise<T>): Promise<T> {
   if (statusSink) {
@@ -63,7 +74,7 @@ export async function withSpinner<T>(text: string, fn: () => Promise<T>): Promis
       done();
     }
   }
-  const spinner = ora({ text: chalk.dim.italic(text) }).start();
+  const spinner = ora({ text: chalk.dim.italic(text), isEnabled: spinnerFits(process.stderr) ? undefined : false }).start();
   try {
     return await raceStop(fn());
   } finally {
