@@ -41,6 +41,15 @@
 // step) goes to a helper model found on the network (any family, 3B+;
 // biggest first, under its own model name), and anything else to the hub.
 //
+// The ladder (Edgar 2026-10-30, as the AI Command Center's router): a request
+// for HELPER_MODEL ("helper", ask's small model while it routes: its SIMPLE
+// triage verdicts and delegate_task legwork) is the main model's on every
+// node and the hub, and when every node is full a helper takes it, terminal
+// tools and all, if what it does only reads (readonly.ts): a write, a step it
+// may not take, or a reply too long for it (HELPER_MAX_TOKENS) goes on to
+// the hub instead; an empty or garbled reply too, and the rest of this run
+// stays off helpers.
+//
 // Through the relay: a node's requests go to the hub (the interdata relay)
 // with X-Interdata-Node = that node, so the relay logs them while the choice
 // stays ours; a node the relay can't take them to is reached straight for a
@@ -61,11 +70,17 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Ollama } from "ollama";
-import { jsonErrors } from "./client.js";
+import { DEFAULT_MAIN_MODEL, jsonErrors } from "./client.js";
 import { describeError, withRetries } from "./retry.js";
 import { fileLeases } from "./leases.js";
 import { ranked, readRanking } from "./ranking.js";
 import { hasImages, knownVision, probeVision, rememberVision } from "./vision.js";
+import { helperReplyOk } from "./readonly.js";
+/** The model name that means "easy work: down the ladder to the helpers when every node is busy". */
+export const HELPER_MODEL = "helper";
+/** A helper takes terminal work only this long (estimated tokens): a long conversation is too much for the Pi. */
+export const HELPER_MAX_TOKENS = 6000;
+const estimateTokens = (request) => Math.ceil(JSON.stringify(request?.messages ?? []).length / 3);
 export const NODES_FILE = join(homedir(), ".eds_tui", "nodes.json");
 function normalizeUrl(u) {
     return u.trim().replace(/\/+$/, "");
@@ -197,7 +212,11 @@ export function parallelSlots(nodes, discovered = []) {
  * client (this applies withRetries itself) and returns the same client.
  */
 export function withNodeRouting(hub, nodes, opts = {}) {
-    const rawHubChat = hub.chat.bind(hub);
+    const mainModel = opts.mainModel ?? DEFAULT_MAIN_MODEL;
+    const forMain = (req) => (req?.model === HELPER_MODEL ? { ...req, model: mainModel } : req);
+    const forHub = (req) => (opts.hubKnowsHelper ? req : forMain(req));
+    const plainHubChat = hub.chat.bind(hub);
+    const rawHubChat = ((req) => plainHubChat(forHub(req)));
     const hubServer = hub.config?.host;
     const hubWithRetries = withRetries({ chat: rawHubChat }, { ...opts.retry, server: hubServer }).chat;
     if (nodes.direct.length === 0 && nodes.lastResort.length === 0 && !opts.discovered) {
@@ -330,8 +349,10 @@ export function withNodeRouting(hub, nodes, opts = {}) {
             }
         }
     }
-    /** A small job on a helper with a free slot (biggest first) that passes its checks and answers, or undefined. */
-    async function trySmall(request) {
+    let offHelpers = false; // a helper garbled a step of this run: the rest goes to the main model
+    /** A small job on a helper with a free slot (biggest first) that passes its checks and answers, or undefined.
+     *  `gated`: terminal work, handed back only if what it does only reads (helperReplyOk). */
+    async function trySmall(request, gated = false) {
         for (const s of small) {
             if (leases.count(s.url) >= (slots[s.url] ?? 1))
                 continue;
@@ -341,7 +362,16 @@ export function withNodeRouting(hub, nodes, opts = {}) {
                 continue;
             }
             try {
-                return { value: await send(s.url, { ...request, model: s.model }, release) };
+                const value = await send(s.url, { ...request, model: s.model }, release);
+                if (gated) {
+                    const [ok, , fault] = helperReplyOk(value?.message);
+                    if (!ok) {
+                        if (fault)
+                            offHelpers = true;
+                        return undefined; // a step for the main model
+                    }
+                }
+                return { value };
             }
             catch (e) {
                 if (e instanceof Error && e.name === "AbortError")
@@ -409,20 +439,24 @@ export function withNodeRouting(hub, nodes, opts = {}) {
             await discovering;
             discovering = undefined;
         }
+        const easy = request.model === HELPER_MODEL;
+        const asked = request;
+        request = forMain(request);
         if (hasImages(request))
             return trySeeing(request);
         const fromNode = await tryDirect(request);
         if (fromNode)
             return fromNode.value;
-        if (!request.tools?.length) {
-            const fromSmall = await trySmall(request); // a small job: a helper before the hub
+        const tools = Boolean(request.tools?.length);
+        if (!tools || (easy && !offHelpers && estimateTokens(request) <= HELPER_MAX_TOKENS)) {
+            const fromSmall = await trySmall(request, tools); // a small job or easy terminal work: a helper before the hub
             if (fromSmall)
                 return fromSmall.value;
         }
         if (nodes.lastResort.length === 0)
-            return hubWithRetries(request);
+            return hubWithRetries(asked);
         try {
-            return await hubOnce(request);
+            return await hubOnce(asked);
         }
         catch (e) {
             if (e instanceof Error && e.name === "AbortError")
@@ -431,7 +465,7 @@ export function withNodeRouting(hub, nodes, opts = {}) {
             const last = await tryNodes(nodes.lastResort, request);
             if (last)
                 return last.value;
-            return hubWithRetries(request);
+            return hubWithRetries(asked);
         }
     };
     return hub;

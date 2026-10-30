@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadNodeConfig, parallelSlots, probeNode, withNodeRouting, type NodeRoutingOptions } from "./nodes.js";
 import { memoryLeases } from "./leases.js";
+import { useQuirksFile } from "./stream-quirks.js";
+
+useQuirksFile(join(mkdtempSync(join(tmpdir(), "eds-tui-quirks-")), "stream-quirks.json")); // never the real ~/.eds_tui
 
 const NODE = "https://pod-11434.proxy.runpod.net";
 const LAST = "http://100.98.75.95:11434";
@@ -317,6 +320,59 @@ test("routing: a small job goes to a smaller qwen (biggest first, under its own 
   assert.equal(small1.message.content, "from http://pez:11434", "no tools: the biggest small qwen");
   assert.deepEqual(sent.find(([u]) => u === "http://pez:11434"), ["http://pez:11434", "qwen3.5:9b"]);
   assert.equal(agentic.message.content, "from hub", "an agentic step (tools) never goes to a small qwen");
+});
+
+test("routing: easy terminal work ('helper') goes down the ladder to a helper when every node is full, unless it writes", async () => {
+  const A = "http://runpod", PI = "http://pi:11434";
+  const got: Array<[string, string, string]> = [];
+  const reply = (from: string, message: any, ms = 0) =>
+    (async function* () {
+      await new Promise((r) => setTimeout(r, ms));
+      yield { done: true, message: { role: "assistant", ...message } };
+    })();
+  const calls: Record<string, any> = {
+    ls: { content: "", tool_calls: [{ function: { name: "run_command", arguments: { command: "ls -la /var/log" } } }] },
+    rm: { content: "", tool_calls: [{ function: { name: "run_command", arguments: { command: "rm -rf /tmp/x" } } }] },
+    junk: { content: "" }, // an empty reply: the helper's fault
+  };
+  const hub = {
+    chat: async (req: any) => (got.push(["hub", req.model, req.messages.at(-1)?.content]), reply("hub", { content: "from hub" })),
+  } as any;
+  withNodeRouting(hub, { direct: [A], lastResort: [], slots: { [A]: 1 } }, {
+    probe: async () => ({ ok: true, detail: "ok" }),
+    makeClient: (url) =>
+      ({
+        chat: async (req: any) => {
+          const word = req.messages.at(-1)?.content;
+          got.push([url, req.model, word]);
+          return url === PI ? reply(url, calls[word] ?? { content: `from ${url}` }) : reply(url, { content: `from ${url}` }, 300);
+        },
+      }) as any,
+    retry: { delaysMs: [0], sleep: async () => {} },
+    leases: memoryLeases(),
+    ranking: () => ({}),
+    small: Promise.resolve([{ url: PI, model: "lfm2.5:latest", params: 8.47 }]),
+    mainModel: "qwen3.8:latest",
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  const tools = [{ type: "function", function: { name: "run_command" } }];
+  const step = (word: string) => hub.chat({ model: "helper", messages: [{ role: "user", content: word }], tools });
+  const idle = await step("ls");
+  assert.equal(idle.message.content, `from ${A}`, "an idle node takes it, as the main model");
+  assert.deepEqual(got.at(-1), [A, "qwen3.8:latest", "ls"]);
+  const [, reads, writes] = await Promise.all([step("busy"), step("ls"), step("rm")]);
+  assert.equal(reads.message.tool_calls[0].function.arguments.command, "ls -la /var/log", "the helper's read is handed back");
+  assert.equal(writes.message.content, "from hub", "a write goes on to the main model (the hub)");
+  assert.ok(got.some(([u, m]) => u === PI && m === "lfm2.5:latest"));
+  assert.ok(got.filter(([u]) => u === "hub").every(([, m]) => m === "qwen3.8:latest"), "the hub never sees 'helper'");
+  const [, junk] = await Promise.all([step("busy"), step("junk")]);
+  assert.equal(junk.message.content, "from hub");
+  got.length = 0;
+  const [, after] = await Promise.all([step("busy"), step("ls")]);
+  assert.equal(after.message.content, "from hub", "after an empty step this run stays off helpers");
+  assert.ok(!got.some(([u]) => u === PI));
+  const plain = await hub.chat({ model: "qwen3.8:latest", messages: [{ role: "user", content: "x" }], tools });
+  assert.equal(plain.message.content, `from ${A}`);
 });
 
 test("routing: through the relay pinned to the node (its tailnet twin's name), straight when the relay can't", async () => {

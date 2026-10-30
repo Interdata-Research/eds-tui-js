@@ -16,7 +16,7 @@ import { makeClient, desiredModels, jsonErrors } from "./client.js";
 import { loadCredentials } from "./credentials.js";
 import { triage } from "./triage.js";
 import { resolveModel, pinFor } from "./resolve-model.js";
-import { withNodeRouting, loadNodeConfig, parallelSlots, isRelayOnly, relayName, type NodeConfig } from "./nodes.js";
+import { HELPER_MODEL, withNodeRouting, loadNodeConfig, parallelSlots, isRelayOnly, relayName, type NodeConfig } from "./nodes.js";
 import { discoverCached, discoverNodes, type Discovered } from "./discover.js";
 import { ranked, refreshRanking, strength, type Route } from "./ranking.js";
 import { fileLeases } from "./leases.js";
@@ -332,6 +332,9 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   let { client, mainModel, smallModel } = await makeClient(main, small, process.env);
+  // The ladder (nodes.ts HELPER_MODEL): unless a small model is named, easy work and legwork ask for "helper", which
+  // the routing below (or the AI Command Center's router) sends to the main model, or a helper when all are busy.
+  const ladder = !process.env.EDS_TUI_SMALL_MODEL?.trim() && process.env.EDS_TUI_LADDER !== "0";
   const nodeConfig = loadNodeConfig(process.env);
   const relay = relayFor(process.env);
   let discovered: Promise<string[]> | undefined;
@@ -343,6 +346,9 @@ async function main(): Promise<void> {
     const urls = discovery?.then((d) => d.urls);
     withNodeRouting(c, nodeConfig, {
       retry: { onRetry: ui.printRetrying },
+      mainModel: model,
+      // EDS_TUI_SMALL_MODEL=helper named outright: the hub is the AI Command Center's router (its tasks), which knows it.
+      hubKnowsHelper: process.env.EDS_TUI_SMALL_MODEL?.trim() === HELPER_MODEL,
       discovered: urls,
       small: discovery?.then((d) => d.small),
       models: discovery?.then((d) => d.models ?? {}),
@@ -367,11 +373,11 @@ async function main(): Promise<void> {
     const own = client;
     client = new Ollama({ host: r.url, headers: r.token ? { Authorization: `Bearer ${r.token}` } : {}, fetch: jsonErrors(fetch) });
     mainModel = main;
-    smallModel = small;
+    smallModel = ladder ? HELPER_MODEL : small;
     withNodeRouting(
       client,
       { direct: [], lastResort: relay ? [relay.url] : [], tokens: relay?.token ? { [relay.url]: relay.token } : {} },
-      { retry: { onRetry: ui.printRetrying } }
+      { retry: { onRetry: ui.printRetrying }, mainModel: main, hubKnowsHelper: true }
     );
     // Except a request with images: the router can't tell which servers drop them (RunPod), so ask picks one that
     // has shown it sees them, by itself (nodes.ts). Set up the first time one comes.
@@ -387,6 +393,7 @@ async function main(): Promise<void> {
     };
   } else {
     discovered = routeItself(client, mainModel);
+    if (ladder) smallModel = HELPER_MODEL;
   }
 
   stoppableChat(client); // Esc in the interactive session ends any model call at once (abort.ts)

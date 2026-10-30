@@ -44,7 +44,9 @@ export EDS_TUI_TOKEN="your_token_here"   # optional, only if your server require
 
 export EDS_TUI_MODEL="qwen3.8:latest"    # optional, main model
 export EDS_TUI_SMALL_MODEL="..."          # optional, a faster model for simpler requests;
-                                         # unset = every request runs on EDS_TUI_MODEL
+                                         # unset = "helper" while ask routes by itself (the
+                                         # ladder, below), else every request on EDS_TUI_MODEL
+export EDS_TUI_LADDER=0                  # optional: no ladder (the small role is the main model)
 ```
 
 Both models must be served from the same Ollama host and support tool calling.
@@ -116,7 +118,8 @@ Each request goes, in order, to:
 1. the **strongest direct node** (see below) with a free slot that passes its
    quick checks;
 2. a small job (no tools: not an agentic step) when every direct node is full
-   or failing: a **smaller qwen** found on the network, biggest first;
+   or failing: a **helper model** found on the network, biggest first; easy
+   terminal work too (the ladder, below);
 3. the **hub**, one attempt;
 4. if that attempt fails or sends nothing in time (every node behind the
    hub busy or not responding), a **last-resort node** that passes its
@@ -150,11 +153,22 @@ has a free slot.
   the spark 0.21/s (a bit faster alone, but one at a time), vps-3 0.06/s.
 - **Slots**: how many requests a node takes at once, `{"url": "...", "slots": 4}`
   in nodes.json (default 1; a plain Ollama answers one at a time at full speed).
-- **Smaller qwens** (qwen3.5 9B, qwen3.5 4B, qwen3 4B…) found on peers that
-  don't run qwen3.8 (never a second model on a qwen3.8 GPU, never cloud or
-  one-job fine-tunes; the one it has loaded, else its biggest) take small jobs
-  (no tools) when every qwen3.8 server is full, biggest first, under their own
-  model name. Agentic steps go to the hub instead.
+- **Helper models** (any chat model of 3B+ loaded on a peer that doesn't run
+  qwen3.8: qwen3.5 9B/4B, the Raspberry Pi's lfm2.5, gemma, phi…; never a
+  second model on a qwen3.8 GPU, never cloud, embedding or one-job fine-tunes;
+  `EDS_TUI_SMALL_MIN_B`) take small jobs (no tools) when every qwen3.8 server
+  is full, biggest first, under their own model name.
+- **The ladder** (0.11): ask's small model is `helper` while it routes, so its
+  SIMPLE triage verdicts and `delegate_task` legwork ask for it. That's the
+  main model on every node and the hub (strongest free one first, as always);
+  when every node is full, a helper takes it, terminal tools and all, as long
+  as what it does only reads (`src/readonly.ts`: `ls`, `df`, `systemctl
+  status`, `git log`, `curl` GETs…). A command that changes something, a step
+  it may not take (delegating), or a long conversation (`HELPER_MAX_TOKENS`)
+  goes to the hub's qwen3.8 instead; an empty or garbled reply too, and the
+  rest of that run stays off helpers. On a machine with the AI Command
+  Center's router, the router does all of this (and learns which helpers do
+  well).
 - **Through the relay**: with an https hub (`ask --login`, or `EDS_TUI_URL`),
   a node's requests go to the hub with `X-Interdata-Node: <node>`, so the relay
   logs them while the choice stays `ask`'s; a node the relay can't take them
