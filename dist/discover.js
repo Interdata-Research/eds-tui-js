@@ -16,10 +16,14 @@
 // under another tag of its family (qwen3.8:27b for qwen3.8:latest, same
 // weights) counts as the main model, sent under that tag (`models`).
 //
-// Smaller qwens (qwen3.5 9B/4B, qwen3 4B…) loaded on peers WITHOUT the main
-// model are kept too, for small jobs when every qwen3.8 server is full
-// (nodes.ts): never on a qwen3.8 server (a second model on its GPU), never
-// cloud, embedding or one-job fine-tunes; the biggest loaded one.
+// Helpers: any other chat model loaded on peers WITHOUT the main model
+// (qwen3.5 9B/4B, the Raspberry Pi's lfm2.5, gemma, phi…: Edgar 2026-10-30,
+// every local model powerful enough to lend a hand, not only qwens) is kept
+// too, for small jobs when every qwen3.8 server is full (nodes.ts): never on a
+// qwen3.8 server (a second model on its GPU), never cloud, embedding or one-job
+// fine-tunes, never under SMALL_MIN_B billion parameters
+// (EDS_TUI_SMALL_MIN_B, 3: the 1-2B ones aren't worth a job); the biggest
+// loaded one.
 //
 // The result is cached in ~/.eds_tui/discovered.json for 10 minutes, so most
 // runs don't look at all. Off with EDS_TUI_DISCOVER=0, `"discover": false`
@@ -85,7 +89,9 @@ export function paramsB(size) {
     const unit = m[2].toUpperCase();
     return unit === "M" ? n / 1000 : unit === "T" ? n * 1000 : n;
 }
-const NOT_SMALL = /cloud|embed|rasa|judge|base/i;
+const NOT_SMALL = /cloud|embed|rerank|bge|minilm|rasa|judge|base/i;
+const NOT_CHAT_FAMILY = /bert|clip/i; // embedding / vision encoders
+export const SMALL_MIN_B = Number(process.env.EDS_TUI_SMALL_MIN_B ?? 3) || 0;
 const base = (name) => name.split(":")[0];
 /** The main model on a server under any tag of its family (qwen3.8:latest, qwen3.8:27b…), the exact name first. */
 export function familyModel(t, mainModel) {
@@ -94,12 +100,19 @@ export function familyModel(t, mainModel) {
         return mainModel;
     return names.find((n) => n && base(n) === base(mainModel) && !NOT_SMALL.test(n)) ?? null;
 }
-/** The smaller qwen a server without the main model takes small jobs with: its biggest LOADED one. */
-export function smallModel(t, loaded, mainModel) {
-    const qwens = (t.models ?? []).filter((m) => m.name && /qwen/i.test(m.name) && !NOT_SMALL.test(m.name) && base(m.name) !== base(mainModel) && loaded.has(m.name));
-    if (!qwens.length)
+/** The helper a server without the main model takes small jobs with: its biggest LOADED chat model of at
+ *  least `minB` billion parameters, any family. */
+export function smallModel(t, loaded, mainModel, minB = SMALL_MIN_B) {
+    const chat = (d = {}) => !NOT_CHAT_FAMILY.test([d.family ?? "", ...(d.families ?? [])].join(" "));
+    const helpers = (t.models ?? []).filter((m) => m.name &&
+        !NOT_SMALL.test(m.name) &&
+        chat(m.details) &&
+        base(m.name) !== base(mainModel) &&
+        loaded.has(m.name) &&
+        paramsB(m.details?.parameter_size) >= minB);
+    if (!helpers.length)
         return null;
-    const best = qwens.reduce((a, b) => (paramsB(b.details?.parameter_size) > paramsB(a.details?.parameter_size) ? b : a));
+    const best = helpers.reduce((a, b) => (paramsB(b.details?.parameter_size) > paramsB(a.details?.parameter_size) ? b : a));
     return { model: best.name, params: paramsB(best.details?.parameter_size) };
 }
 export async function discoverNodes(o) {
@@ -109,7 +122,7 @@ export async function discoverNodes(o) {
     const replies = await Promise.all(urls.map((u) => tags(u, o)));
     const owner = new Map(); // fingerprint -> the address that keeps it
     const out = { urls: [], duplicates: {}, small: [], models: {}, idle: [] };
-    const others = []; // found peers: the main model loaded, else maybe a smaller qwen
+    const others = []; // found peers: the main model loaded, else maybe a helper
     urls.forEach((url, i) => {
         const t = replies[i];
         if (!t || !(t.models ?? []).length)

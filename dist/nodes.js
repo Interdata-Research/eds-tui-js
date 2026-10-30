@@ -38,8 +38,8 @@
 // server, and delegate_tasks' sub-agents and parallel asks still run at once.
 // Servers found by discover.ts join the direct nodes with one slot each.
 // When every node is full (or failing), a small job (no tools: not an agentic
-// step) goes to a smaller qwen found on the network (biggest first, under its
-// own model name), and anything else to the hub.
+// step) goes to a helper model found on the network (any family, 3B+;
+// biggest first, under its own model name), and anything else to the hub.
 //
 // Through the relay: a node's requests go to the hub (the interdata relay)
 // with X-Interdata-Node = that node, so the relay logs them while the choice
@@ -330,7 +330,7 @@ export function withNodeRouting(hub, nodes, opts = {}) {
             }
         }
     }
-    /** A small job on a smaller qwen with a free slot (biggest first) that passes its checks and answers, or undefined. */
+    /** A small job on a helper with a free slot (biggest first) that passes its checks and answers, or undefined. */
     async function trySmall(request) {
         for (const s of small) {
             if (leases.count(s.url) >= (slots[s.url] ?? 1))
@@ -415,7 +415,7 @@ export function withNodeRouting(hub, nodes, opts = {}) {
         if (fromNode)
             return fromNode.value;
         if (!request.tools?.length) {
-            const fromSmall = await trySmall(request); // a small job: a smaller qwen before the hub
+            const fromSmall = await trySmall(request); // a small job: a helper before the hub
             if (fromSmall)
                 return fromSmall.value;
         }

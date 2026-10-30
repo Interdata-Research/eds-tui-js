@@ -38,8 +38,8 @@
 // server, and delegate_tasks' sub-agents and parallel asks still run at once.
 // Servers found by discover.ts join the direct nodes with one slot each.
 // When every node is full (or failing), a small job (no tools: not an agentic
-// step) goes to a smaller qwen found on the network (biggest first, under its
-// own model name), and anything else to the hub.
+// step) goes to a helper model found on the network (any family, 3B+;
+// biggest first, under its own model name), and anything else to the hub.
 //
 // Through the relay: a node's requests go to the hub (the interdata relay)
 // with X-Interdata-Node = that node, so the relay logs them while the choice
@@ -228,7 +228,7 @@ export interface NodeRoutingOptions {
   leases?: Leases;
   /** More direct nodes found on the network (discover.ts), one slot each; awaited by the first request. */
   discovered?: Promise<string[]>;
-  /** Smaller qwens found on the network (discover.ts), for small jobs when every node is full or failing. */
+  /** Helper models found on the network (discover.ts), for small jobs when every node is full or failing. */
   small?: Promise<SmallServer[]>;
   /** Found nodes with the main model under another tag (qwen3.8:27b): the name to send them (discover.ts). */
   models?: Promise<Record<string, string>>;
@@ -398,7 +398,7 @@ export function withNodeRouting(hub: Ollama, nodes: NodeConfig, opts: NodeRoutin
     }
   }
 
-  /** A small job on a smaller qwen with a free slot (biggest first) that passes its checks and answers, or undefined. */
+  /** A small job on a helper with a free slot (biggest first) that passes its checks and answers, or undefined. */
   async function trySmall(request: any): Promise<{ value: any } | undefined> {
     for (const s of small) {
       if (leases.count(s.url) >= (slots[s.url] ?? 1)) continue;
@@ -481,7 +481,7 @@ export function withNodeRouting(hub: Ollama, nodes: NodeConfig, opts: NodeRoutin
     const fromNode = await tryDirect(request);
     if (fromNode) return fromNode.value;
     if (!request.tools?.length) {
-      const fromSmall = await trySmall(request); // a small job: a smaller qwen before the hub
+      const fromSmall = await trySmall(request); // a small job: a helper before the hub
       if (fromSmall) return fromSmall.value;
     }
     if (nodes.lastResort.length === 0) return hubWithRetries(request);

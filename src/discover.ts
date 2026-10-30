@@ -16,10 +16,14 @@
 // under another tag of its family (qwen3.8:27b for qwen3.8:latest, same
 // weights) counts as the main model, sent under that tag (`models`).
 //
-// Smaller qwens (qwen3.5 9B/4B, qwen3 4B…) loaded on peers WITHOUT the main
-// model are kept too, for small jobs when every qwen3.8 server is full
-// (nodes.ts): never on a qwen3.8 server (a second model on its GPU), never
-// cloud, embedding or one-job fine-tunes; the biggest loaded one.
+// Helpers: any other chat model loaded on peers WITHOUT the main model
+// (qwen3.5 9B/4B, the Raspberry Pi's lfm2.5, gemma, phi…: Edgar 2026-10-30,
+// every local model powerful enough to lend a hand, not only qwens) is kept
+// too, for small jobs when every qwen3.8 server is full (nodes.ts): never on a
+// qwen3.8 server (a second model on its GPU), never cloud, embedding or one-job
+// fine-tunes, never under SMALL_MIN_B billion parameters
+// (EDS_TUI_SMALL_MIN_B, 3: the 1-2B ones aren't worth a job); the biggest
+// loaded one.
 //
 // The result is cached in ~/.eds_tui/discovered.json for 10 minutes, so most
 // runs don't look at all. Off with EDS_TUI_DISCOVER=0, `"discover": false`
@@ -49,7 +53,7 @@ export interface Discovered {
   urls: string[];
   /** Addresses left out because they are a configured (or earlier) server under another address. */
   duplicates: Record<string, string>;
-  /** Smaller qwens on servers without the main model, biggest first. */
+  /** Helper models on servers without the main model, biggest first. */
   small: SmallServer[];
   /** Found servers that have the main model under another tag (qwen3.8:27b): the name to send. */
   models?: Record<string, string>;
@@ -90,7 +94,12 @@ export function tailscalePeers(timeoutMs = 2_000): Promise<string[]> {
 }
 
 interface Tags {
-  models?: Array<{ name?: string; digest?: string; modified_at?: string; details?: { parameter_size?: string } }>;
+  models?: Array<{
+    name?: string;
+    digest?: string;
+    modified_at?: string;
+    details?: { parameter_size?: string; family?: string; families?: string[] };
+  }>;
 }
 
 async function tags(url: string, o: DiscoverOptions, path = "tags"): Promise<Tags | null> {
@@ -125,7 +134,9 @@ export function paramsB(size: string | undefined): number {
   return unit === "M" ? n / 1000 : unit === "T" ? n * 1000 : n;
 }
 
-const NOT_SMALL = /cloud|embed|rasa|judge|base/i;
+const NOT_SMALL = /cloud|embed|rerank|bge|minilm|rasa|judge|base/i;
+const NOT_CHAT_FAMILY = /bert|clip/i; // embedding / vision encoders
+export const SMALL_MIN_B = Number(process.env.EDS_TUI_SMALL_MIN_B ?? 3) || 0;
 
 const base = (name: string) => name.split(":")[0]!;
 
@@ -136,13 +147,26 @@ export function familyModel(t: Tags, mainModel: string): string | null {
   return names.find((n) => n && base(n) === base(mainModel) && !NOT_SMALL.test(n)) ?? null;
 }
 
-/** The smaller qwen a server without the main model takes small jobs with: its biggest LOADED one. */
-export function smallModel(t: Tags, loaded: Set<string>, mainModel: string): { model: string; params: number } | null {
-  const qwens = (t.models ?? []).filter(
-    (m) => m.name && /qwen/i.test(m.name) && !NOT_SMALL.test(m.name) && base(m.name) !== base(mainModel) && loaded.has(m.name)
+/** The helper a server without the main model takes small jobs with: its biggest LOADED chat model of at
+ *  least `minB` billion parameters, any family. */
+export function smallModel(
+  t: Tags,
+  loaded: Set<string>,
+  mainModel: string,
+  minB = SMALL_MIN_B
+): { model: string; params: number } | null {
+  const chat = (d: { family?: string; families?: string[] } = {}) => !NOT_CHAT_FAMILY.test([d.family ?? "", ...(d.families ?? [])].join(" "));
+  const helpers = (t.models ?? []).filter(
+    (m) =>
+      m.name &&
+      !NOT_SMALL.test(m.name) &&
+      chat(m.details) &&
+      base(m.name) !== base(mainModel) &&
+      loaded.has(m.name) &&
+      paramsB(m.details?.parameter_size) >= minB
   );
-  if (!qwens.length) return null;
-  const best = qwens.reduce((a, b) => (paramsB(b.details?.parameter_size) > paramsB(a.details?.parameter_size) ? b : a));
+  if (!helpers.length) return null;
+  const best = helpers.reduce((a, b) => (paramsB(b.details?.parameter_size) > paramsB(a.details?.parameter_size) ? b : a));
   return { model: best.name!, params: paramsB(best.details?.parameter_size) };
 }
 
@@ -153,7 +177,7 @@ export async function discoverNodes(o: DiscoverOptions): Promise<Discovered> {
   const replies = await Promise.all(urls.map((u) => tags(u, o)));
   const owner = new Map<string, string>(); // fingerprint -> the address that keeps it
   const out: Discovered = { urls: [], duplicates: {}, small: [], models: {}, idle: [] };
-  const others: Array<[string, Tags]> = []; // found peers: the main model loaded, else maybe a smaller qwen
+  const others: Array<[string, Tags]> = []; // found peers: the main model loaded, else maybe a helper
   urls.forEach((url, i) => {
     const t = replies[i];
     if (!t || !(t.models ?? []).length) return;

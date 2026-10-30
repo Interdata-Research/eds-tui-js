@@ -146,7 +146,7 @@ async function userMessage(request) {
     return images.length ? { role: "user", content: request + attachedNote(paths), images } : { role: "user", content: request };
 }
 const NOTHING_FOUND = { urls: [], duplicates: {}, small: [] };
-/** More qwen3.8 servers and smaller qwens on the network (discover.ts), unless the configuration turns that off. */
+/** More qwen3.8 servers and helper models on the network (discover.ts), unless the configuration turns that off. */
 function discoveryFor(cfg, model) {
     if (!cfg.discover)
         return undefined;
@@ -224,7 +224,7 @@ async function printNodes(model) {
         console.log(`  ${i + 1}. ${url}  ${chalk.dim(`${why(url)}, ${cfg.slots?.[url] ?? 1} at a time, ${leases.count(url)} running now`)}  ${state}${eyes}`);
     });
     for (const s of found.small)
-        console.log(`  ·  ${s.url}  ${chalk.dim(`${s.model} (${s.params}B): small jobs when every ${model} server is busy`)}`);
+        console.log(`  ·  ${s.url}  ${chalk.dim(`${s.model} (${s.params}B): helper for small jobs when every ${model} server is busy`)}`);
     for (const s of found.idle ?? [])
         console.log(`  ·  ${s.url}  ${chalk.dim(`has ${s.model}, not loaded: not used (never made to load it)`)}`);
     for (const url of cfg.lastResort)

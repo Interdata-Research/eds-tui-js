@@ -37,9 +37,10 @@ test("discoverNodes: finds the peers serving the model, and one server under two
   assert.deepEqual(d.duplicates, { [RUNPOD_TS]: RUNPOD }, "the configured address wins");
 });
 
-test("discoverNodes: smaller qwens on peers without qwen3.8, biggest first, never cloud or fine-tunes", async () => {
+test("discoverNodes: helpers (any chat model of 3B+) on peers without qwen3.8, biggest first, never cloud or fine-tunes", async () => {
   const P9 = "http://100.85.150.29:11434", P4 = "http://100.96.62.59:11434", MIXED = "http://100.1.2.3:11434";
   const LAPTOP = "http://100.119.109.55:11434", TAGGED = "http://100.4.5.6:11434";
+  const PI = "http://100.105.12.82:11434", EMBED = "http://100.7.8.9:11434";
   const servers: Record<string, unknown> = {
     ...SERVERS,
     [P9]: { models: [
@@ -57,20 +58,28 @@ test("discoverNodes: smaller qwens on peers without qwen3.8, biggest first, neve
     [`${LAPTOP}/api/ps`]: { models: [] }, // nothing loaded: never made to load it
     [TAGGED]: { models: [{ name: "qwen3.8:27b", digest: "g1" }] },
     [`${TAGGED}/api/ps`]: { models: [{ name: "qwen3.8:27b" }] },
+    // not a qwen: the Raspberry Pi's lfm2.5 helps too; its 1.7B beside it doesn't
+    [PI]: { models: [
+      { name: "lfm2.5:latest", digest: "h1", details: { parameter_size: "8.47B", family: "lfm2moe" } },
+      { name: "hf.co/LiquidAI/LFM3-1.7B-GGUF:Q4_K_M", digest: "h2", details: { parameter_size: "1.73B", family: "lfm3" } },
+    ] },
+    [`${PI}/api/ps`]: { models: [{ name: "lfm2.5:latest" }, { name: "hf.co/LiquidAI/LFM3-1.7B-GGUF:Q4_K_M" }] },
+    [EMBED]: { models: [{ name: "granite-text:278m", digest: "i1", details: { parameter_size: "4B", family: "nomic-bert" } }] },
+    [`${EMBED}/api/ps`]: { models: [{ name: "granite-text:278m" }] },
   };
   const fetchAll = (async (url: string) => {
     const body = servers[url.replace(/\/api\/tags$/, "")];
     if (!body) throw new TypeError("fetch failed");
     return new Response(JSON.stringify(body), { status: 200 });
   }) as unknown as typeof fetch;
-  const d = await discoverNodes({ model: "qwen3.8:latest", configured: [RUNPOD], candidates: async () => [N98, P4, P9, MIXED, LAPTOP, TAGGED], fetchFn: fetchAll });
+  const d = await discoverNodes({ model: "qwen3.8:latest", configured: [RUNPOD], candidates: async () => [N98, P4, P9, MIXED, LAPTOP, TAGGED, PI, EMBED], fetchFn: fetchAll });
   assert.deepEqual(d.urls, [N98, MIXED, TAGGED], "a qwen3.8 server with small qwens too is a qwen3.8 server");
   assert.deepEqual(d.models, { [TAGGED]: "qwen3.8:27b" }, "qwen3.8 under another tag, sent under that tag");
   assert.deepEqual(d.idle, [{ url: LAPTOP, model: "qwen3.8:27b" }], "not loaded: listed, never used");
   assert.deepEqual(d.small, [
     { url: P9, model: "qwen3.5:9b", params: 9.7 },
-    { url: P4, model: "qwen3.5:2b", params: 2.3 },
-  ]);
+    { url: PI, model: "lfm2.5:latest", params: 8.47 },
+  ], "P4's 2.3B is too small to help, EMBED is an embedding model");
 });
 
 test("discoverNodes: a configured server is never added again", async () => {
