@@ -48,7 +48,9 @@
 // tools and all, if what it does only reads (readonly.ts): a write, a step it
 // may not take, or a reply too long for it (HELPER_MAX_TOKENS) goes on to
 // the hub instead; an empty or garbled reply too, and the rest of this run
-// stays off helpers.
+// stays off helpers. Helpers learn (experience.ts): for terminal work the
+// one with the best record for this kind of task goes first, and one that
+// keeps failing at it gets no more of it for a while.
 //
 // Through the relay: a node's requests go to the hub (the interdata relay)
 // with X-Interdata-Node = that node, so the relay logs them while the choice
@@ -76,6 +78,7 @@ import { fileLeases } from "./leases.js";
 import { ranked, readRanking } from "./ranking.js";
 import { hasImages, knownVision, probeVision, rememberVision } from "./vision.js";
 import { helperReplyOk } from "./readonly.js";
+import { currentKind, garbled, helped, helperOrder } from "./experience.js";
 /** The model name that means "easy work: down the ladder to the helpers when every node is busy". */
 export const HELPER_MODEL = "helper";
 /** A helper takes terminal work only this long (estimated tokens): a long conversation is too much for the Pi. */
@@ -351,9 +354,10 @@ export function withNodeRouting(hub, nodes, opts = {}) {
     }
     let offHelpers = false; // a helper garbled a step of this run: the rest goes to the main model
     /** A small job on a helper with a free slot (biggest first) that passes its checks and answers, or undefined.
-     *  `gated`: terminal work, handed back only if what it does only reads (helperReplyOk). */
+     *  `gated`: terminal work, handed back only if what it does only reads (helperReplyOk); the helpers with the best
+     *  record for this kind of task first, none that keeps failing at it (experience.ts). */
     async function trySmall(request, gated = false) {
-        for (const s of small) {
+        for (const s of gated ? helperOrder(small, currentKind()) : small) {
             if (leases.count(s.url) >= (slots[s.url] ?? 1))
                 continue;
             const release = leases.acquire(s.url);
@@ -364,12 +368,15 @@ export function withNodeRouting(hub, nodes, opts = {}) {
             try {
                 const value = await send(s.url, { ...request, model: s.model }, release);
                 if (gated) {
-                    const [ok, , fault] = helperReplyOk(value?.message);
+                    const [ok, why, fault] = helperReplyOk(value?.message);
                     if (!ok) {
-                        if (fault)
+                        if (fault) {
                             offHelpers = true;
+                            garbled(s.model, why);
+                        }
                         return undefined; // a step for the main model
                     }
+                    helped(s.model);
                 }
                 return { value };
             }

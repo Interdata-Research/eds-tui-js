@@ -6,6 +6,7 @@
 // everything else in this package is composed together here.
 
 import { existsSync, readFileSync, writeFileSync, unlinkSync, realpathSync, mkdirSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,7 +21,9 @@ import { HELPER_MODEL, withNodeRouting, loadNodeConfig, parallelSlots, isRelayOn
 import { discoverCached, discoverNodes, type Discovered } from "./discover.js";
 import { ranked, refreshRanking, strength, type Route } from "./ranking.js";
 import { fileLeases } from "./leases.js";
-import { stoppableChat } from "./abort.js";
+import { isStopped, stoppableChat } from "./abort.js";
+import { beginTurn, endTurn } from "./experience.js";
+import { learningSource, playbookNotes, runLog, type LearningSource, type Playbook, type RunReport } from "./learning.js";
 import { repairAfterStop, runSession } from "./session.js";
 import { buildSystemPrompt } from "./prompt-builder.js";
 import { agenticLoop, HARD_MAX_TURNS } from "./agent.js";
@@ -366,12 +369,18 @@ async function main(): Promise<void> {
     return urls;
   };
 
+  // Read per request (ollama-js keeps this object): X-CC-Run names the message being answered (answer()), so the
+  // center's router learns how its helpers did on it.
+  const routerHeaders: Record<string, string> = {};
+  let routed = false;
   if (nodeConfig.router && !process.env.EDS_TUI_URL && (await routerUp(nodeConfig.router))) {
     // The AI Command Center's router on this machine ranks and spreads every request of every ask and task here
     // (strongest qwen first, through the relay); the relay itself is the last resort if the router fails.
     const r = nodeConfig.router;
     const own = client;
-    client = new Ollama({ host: r.url, headers: r.token ? { Authorization: `Bearer ${r.token}` } : {}, fetch: jsonErrors(fetch) });
+    if (r.token) routerHeaders.Authorization = `Bearer ${r.token}`;
+    routed = true;
+    client = new Ollama({ host: r.url, headers: routerHeaders, fetch: jsonErrors(fetch) });
     mainModel = main;
     smallModel = ladder ? HELPER_MODEL : small;
     withNodeRouting(
@@ -397,6 +406,8 @@ async function main(): Promise<void> {
   }
 
   stoppableChat(client); // Esc in the interactive session ends any model call at once (abort.ts)
+  // The AI Command Center's playbooks (learning.ts): through its router's address here, else ccd-node on a server.
+  const learning: LearningSource | undefined = learningSource(process.env, routed ? nodeConfig.router : undefined);
 
   ui.printHeader(process.cwd());
 
@@ -445,6 +456,10 @@ async function main(): Promise<void> {
   /** One message: pick its model and skill, build the system prompt for it, run the loop. */
   async function answer(request: string, namedSkill: Skill | null): Promise<void> {
     const triageFn = (input: string) => triage(client, input, mainModel, smallModel);
+    const run = randomBytes(8).toString("hex");
+    if (routed) routerHeaders["X-CC-Run"] = run;
+    beginTurn(request); // its kind of work: the helpers are scored on it (experience.ts)
+    const found: Promise<Playbook[]> = learning ? learning.search(request).catch(() => []) : Promise.resolve([]);
 
     let active: string;
     let skill: Skill | null;
@@ -468,6 +483,8 @@ async function main(): Promise<void> {
     const otherSkillsIndex = otherSkills.size > 0 ? skills.indexLines(otherSkills) : null;
 
     const slotsNow = parallelSlots(nodeConfig, (await discovered) ?? []);
+    const books = await found;
+    if (books.length) console.log(chalk.dim(`  Playbooks from earlier work: ${books.map((b) => b.title).join("; ")}\n`));
     messages[0] = {
       role: "system",
       content: buildSystemPrompt({
@@ -480,12 +497,32 @@ async function main(): Promise<void> {
         renderedSkill,
         otherSkillsIndex,
         parallelSlots: slotsNow,
-      }),
+      }) + (books.length ? `\n\n${playbookNotes(books)}` : ""),
     };
     messages.push(await userMessage(request));
+    const from = messages.length;
 
     const stats: Partial<RunStats> = {};
-    await agenticLoop(deps, messages, active, stats);
+    let reply = "";
+    let outcome: RunReport["outcome"] | "stopped" = "failed";
+    try {
+      reply = (await agenticLoop(deps, messages, active, stats)) ?? "";
+      outcome = stats.capped ? "unfinished" : reply.trim() ? "done" : "failed";
+    } catch (e) {
+      outcome = isStopped(e) ? "stopped" : "failed";
+      throw e;
+    } finally {
+      endTurn(outcome);
+      // A message that ran commands goes to the center: reviewed for playbooks, and its router learns from it.
+      if (learning && outcome !== "stopped" && (stats.commands ?? 0) > 0) {
+        await learning
+          .report({
+            run, outcome, request: request.slice(0, 20000), log: runLog(messages, from, 38000),
+            reply: reply.slice(-20000), given: books.map((b) => b.path).slice(0, 10), folder: process.cwd(),
+          })
+          .catch(() => false);
+      }
+    }
   }
 
   if (oneShot) {

@@ -6,8 +6,10 @@ import { join } from "node:path";
 import { loadNodeConfig, parallelSlots, probeNode, withNodeRouting, type NodeRoutingOptions } from "./nodes.js";
 import { memoryLeases } from "./leases.js";
 import { useQuirksFile } from "./stream-quirks.js";
+import { beginTurn, endTurn, learn, useExperienceFile } from "./experience.js";
 
 useQuirksFile(join(mkdtempSync(join(tmpdir(), "eds-tui-quirks-")), "stream-quirks.json")); // never the real ~/.eds_tui
+useExperienceFile(join(mkdtempSync(join(tmpdir(), "eds-tui-experience-")), "helper-experience.json")); // nor here
 
 const NODE = "https://pod-11434.proxy.runpod.net";
 const LAST = "http://100.98.75.95:11434";
@@ -446,4 +448,53 @@ test("a relay-only node ({\"relay\": \"Home\"}): parsed, checked and sent throug
   });
   assert.deepEqual(await s.many(1), ["relay → Home"]);
   assert.deepEqual([pinned, straight], [["Home"], []]);
+});
+
+test("routing: terminal work goes to the helper with the best record for its kind, never one that keeps failing at it", async () => {
+  const A = "http://runpod", FAST = "http://fast:11434", PI = "http://pi:11434";
+  const got: string[] = [];
+  const read = { content: "", tool_calls: [{ function: { name: "run_command", arguments: { command: "git log -3" } } }] };
+  const reply = (message: any, ms = 0) =>
+    (async function* () {
+      await new Promise((r) => setTimeout(r, ms));
+      yield { done: true, message: { role: "assistant", ...message } };
+    })();
+  const hub = { chat: async () => reply({ content: "from hub" }) } as any;
+  withNodeRouting(hub, { direct: [A], lastResort: [], slots: { [A]: 1 } }, {
+    probe: async () => ({ ok: true, detail: "ok" }),
+    makeClient: (url) =>
+      ({
+        chat: async (req: any) => {
+          if (req.messages.at(-1)?.content !== "busy") got.push(url);
+          return url === A ? reply({ content: "from runpod" }, 300) : reply(read);
+        },
+      }) as any,
+    retry: { delaysMs: [0], sleep: async () => {} },
+    leases: memoryLeases(),
+    ranking: () => ({}),
+    small: Promise.resolve([
+      { url: FAST, model: "qwen3:4b", params: 4 },
+      { url: PI, model: "lfm2.5:latest", params: 8.47 },
+    ]),
+    mainModel: "qwen3.8:latest",
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  const tools = [{ type: "function", function: { name: "run_command" } }];
+  const step = (word: string) => hub.chat({ model: "helper", messages: [{ role: "user", content: word }], tools });
+  const whileBusy = async () => (await Promise.all([step("busy"), step("go")]), got.at(-1));
+  for (let i = 0; i < 3; i++) learn("lfm2.5:latest", true, "git"); // the Pi has done git work well
+  beginTurn("rebase my branch on main");
+  assert.equal(await whileBusy(), PI, "its record for git beats the faster helper");
+  endTurn("done");
+  beginTurn("check the docker containers");
+  assert.equal(await whileBusy(), FAST, "no record for docker: the first (fastest) helper");
+  endTurn("failed");
+  beginTurn("list the docker images");
+  assert.equal(await whileBusy(), PI, "after qwen3:4b failed at docker, the other helper gets the next one");
+  endTurn("done");
+  beginTurn("show the docker compose logs");
+  assert.equal(await whileBusy(), PI, "and keeps it while it does well");
+  endTurn("stopped");
+  beginTurn("git status of the repo");
+  assert.equal(await whileBusy(), PI);
 });

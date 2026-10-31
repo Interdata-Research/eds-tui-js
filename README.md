@@ -47,6 +47,7 @@ export EDS_TUI_SMALL_MODEL="..."          # optional, a faster model for simpler
                                          # unset = "helper" while ask routes by itself (the
                                          # ladder, below), else every request on EDS_TUI_MODEL
 export EDS_TUI_LADDER=0                  # optional: no ladder (the small role is the main model)
+export EDS_TUI_LEARNING=0                # optional: no playbooks from the AI Command Center (below)
 ```
 
 Both models must be served from the same Ollama host and support tool calling.
@@ -169,6 +170,29 @@ has a free slot.
   rest of that run stays off helpers. On a machine with the AI Command
   Center's router, the router does all of this (and learns which helpers do
   well).
+- **Helpers learn** (0.12, `src/experience.ts`): each message ask answers is
+  one kind of work (`src/task-kinds.ts`: git, docker, services, network,
+  files, logs, packages, models, system, database, code, other), and the
+  helpers that did a step of it are scored by how it ended (answered = good,
+  out of turns or failed = bad, Esc = not counted; a garbled reply counts
+  against its helper at once), in `~/.eds_tui/helper-experience.json`. For
+  terminal work the helper with the best record for that kind goes first (the
+  fastest on a tie), and one that failed at least twice, and more than twice
+  as often as not, overall or at that kind, gets none of it for 6 hours. The
+  AI Command Center's router keeps the same record when ask routes through it
+  (each message's requests carry `X-CC-Run`).
+- **Playbooks** (0.12, `src/learning.ts`): the AI Command Center writes notes
+  on how a task was done the direct way into Edgar's local Eds LAN Brain
+  ("unverified" until they've worked twice). ask run by hand gets them too:
+  before answering, the playbooks that fit the message go into its system
+  prompt (a dim "Playbooks from earlier work: …" line says which); after, a
+  message that ran commands is reported (what was asked, what ran, the
+  answer, the playbooks it got) and the center reviews it like one of its
+  tasks: a new playbook, one counted again, one that was wrong. On the
+  center's machine through the router's address in nodes.json; on another
+  server through `ccd-node learning` (ccd-node 1.9+, which keeps that server's
+  token). Not for the center's own tasks (it does this itself), nor with
+  `EDS_TUI_LEARNING=0`. Fails soft in a few seconds: no center, no playbooks.
 - **Through the relay**: with an https hub (`ask --login`, or `EDS_TUI_URL`),
   a node's requests go to the hub with `X-Interdata-Node: <node>`, so the relay
   logs them while the choice stays `ask`'s; a node the relay can't take them
